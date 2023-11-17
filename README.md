@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Vesuvius Kintsugi is a tool designed for the Vesuvius Challenge (https://scrollprize.org/) aimed at facilitating labeling 3D voxel data extracted from the Herculaneum scrolls. This tool alleviates the complexities of annotating 3D segments by providing an intuitive interface for manual segmentation and labeling, crucial for the creation of ground truth datasets necessary for machine learning models.
+Vesuvius Kintsugi is a tool designed for the Vesuvius Challenge (https://scrollprize.org/) aimed at facilitating labeling 3D voxel data extracted from the Herculaneum scrolls. This tool alleviates the complexities of annotating 3D segments by providing an intuitive interface for manual segmentation and labeling of the "ink crackles", crucial for the creation of ground truth datasets necessary for machine learning ink detection models.
 
 POUR GOLD INTO THE CRACKLES!
 
