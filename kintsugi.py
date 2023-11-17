@@ -50,6 +50,33 @@ class VesuviusKintsugi:
             except Exception as e:
                 self.update_log(f"Error loading data: {e}")
 
+    def load_mask(self):
+        if self.voxel_data is None:
+            self.update_log("No voxel data loaded. Load voxel data first.")
+            return
+
+        # Prompt to save changes if there are any unsaved changes
+        if self.history:
+            if not tk.messagebox.askyesno("Unsaved Changes", "You have unsaved changes. Do you want to continue without saving?"):
+                return
+
+        # File dialog to select mask file
+        mask_file_path = filedialog.askdirectory(
+            title="Select Label Zarr File")
+        
+
+        if mask_file_path:
+            try:
+                loaded_mask = np.array(zarr.open(mask_file_path, mode='r'))
+                if loaded_mask.shape == self.voxel_data.shape:
+                    self.mask_data = loaded_mask
+                    self.update_display_slice()
+                    self.update_log("Label loaded successfully.")
+                else:
+                    self.update_log("Error: Label dimensions do not match the voxel data dimensions.")
+            except Exception as e:
+                self.update_log(f"Error loading mask: {e}")
+
     def save_image(self):
         if self.mask_data is not None:
             # Construct the default file name for saving
@@ -357,7 +384,7 @@ class VesuviusKintsugi:
     def show_help(self):
         help_window = tk.Toplevel(self.root)
         help_window.title("Info")
-        help_window.geometry("300x600")  # Adjust size as necessary
+        help_window.geometry("300x700")  # Adjust size as necessary
         help_window.resizable(False, False)
 
         info_text = """Vesuvius Kintsugi: A tool for labeling 3D Zarr images for the Vesuvius Challenge (scrollprize.org).
@@ -367,15 +394,19 @@ class VesuviusKintsugi:
         Commands Overview:
         - Icons (Left to Right): 
         1. Open Zarr 3D Image
-        2. Save Zarr 3D Label
-        3. Undo Last Action
-        4. Brush Tool
-        5. Eraser Tool
-        6. 'Pour Gold' (3D Bucket)
-        7. STOP (Halts Gold Pouring)
-        8. Pencil Size Selector
-        9. Gold Pouring Threshold
-        10. Toggle Label/Image (Side-by-side buttons for showing/hiding Labeling or Image)
+        2. Open Zarr 3D Label
+        3. Save Zarr 3D Label
+        4. Undo Last Action
+        5. Brush Tool
+        6. Eraser Tool
+        7. 'Pour Gold' (3D Bucket)
+        8. STOP (Halts Gold Pouring)
+        9. Pencil Size Selector
+        10. Gold Pouring Threshold
+        11. Info
+
+        - Bottom
+        1. Toggle Label/Image (Side-by-side buttons for showing/hiding Labeling or Image)
 
         Usage Tips:
         - Pouring Gold: Propagates gold in 3D based on neighbor voxel values and threshold.
@@ -448,6 +479,7 @@ class VesuviusKintsugi:
         bucket_icon = PhotoImage(file='./icons/bucket-64.png')
         stop_icon = PhotoImage(file='./icons/stop-60.png')
         help_icon = PhotoImage(file='./icons/help-48.png')
+        load_mask_icon = PhotoImage(file='./icons/ink-64.png')  # Replace with the actual path to icon
 
         self.mode = tk.StringVar(value="bucket")
 
@@ -456,6 +488,11 @@ class VesuviusKintsugi:
         load_button.image = load_icon
         load_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(load_button, "Open Zarr 3D Image")
+
+        load_mask_button = ttk.Button(toolbar_frame, image=load_mask_icon, command=self.load_mask)
+        load_mask_button.image = load_mask_icon
+        load_mask_button.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(load_mask_button, "Load Ink Label")
 
         save_button = ttk.Button(toolbar_frame, image=save_icon, command=self.save_image)
         save_button.image = save_icon
@@ -513,7 +550,7 @@ class VesuviusKintsugi:
         bucket_threshold_label = ttk.Label(toolbar_frame, text="Bucket Threshold:")
         bucket_threshold_label.pack(side=tk.LEFT, padx=(10, 2))  # Add some padding for spacing
 
-        bucket_threshold_slider = ttk.Scale(toolbar_frame, from_=0, to=255, orient=tk.HORIZONTAL, command=self.update_threshold)
+        bucket_threshold_slider = ttk.Scale(toolbar_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.update_threshold)
         bucket_threshold_slider.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(bucket_threshold_slider, "Adjust Bucket Threshold")
 
