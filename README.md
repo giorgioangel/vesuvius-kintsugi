@@ -8,7 +8,7 @@ POUR GOLD INTO THE CRACKLES!
 
 ![ pour gold](example.gif)
 ## Features
-
+![my screenshot](screenshot.jpg)
 ### Interactive UI
 - A graphical user interface that enables users to navigate through 3D Zarr data.
 - Tools for labeling including brush, eraser, and flood fill (3D bucket).
@@ -34,13 +34,9 @@ POUR GOLD INTO THE CRACKLES!
 Before using Vesuvius Kintsugi, ensure that the following dependencies are installed:
 
 ```console
-pip install numpy zarr Pillow
+pip install numpy zarr Pillow tk ttkthemes
 ```
 
-For the UI components:
-```console
-pip install tk ttkthemes
-```
 ## Usage
 Run the main Python script to launch the Vesuvius Kintsugi interface:
 ```console
