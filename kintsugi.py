@@ -11,13 +11,19 @@ import sys
 
 class VesuviusKintsugi:
     def __init__(self):
+        self.overlay_alpha = 255
+        self.barrier_mask = None  # New mask to act as a barrier for flood fill
+        self.editing_barrier = False  # False for editing label, True for editing barrier
+        self.max_propagation_steps = 100  # Default maximum propagation steps
+        self.show_barrier = True
         self.voxel_data = None
         self.photo_img = None
+        self.th_layer = 0
         self.resized_img = None
         self.z_index = 0
         self.pencil_size = 0
         self.click_coordinates = None
-        self.threshold = 4
+        self.threshold = [10]
         self.log_text = None
         self.zoom_level = 1
         self.max_zoom_level = 15
@@ -42,10 +48,15 @@ class VesuviusKintsugi:
                 # Load the Zarr data into the voxel_data attribute
                 self.voxel_data = np.array(zarr.open(dir_path, mode='r'))
                 self.mask_data = np.zeros_like(self.voxel_data)
+                self.barrier_mask = np.zeros_like(self.voxel_data)
                 self.z_index = 0
+                if self.voxel_data is not None:
+                    self.threshold = [10 for _ in range(self.voxel_data.shape[0])]
                 self.update_display_slice()
                 self.file_name = os.path.basename(dir_path)
                 self.root.title(f"Vesuvius Kintsugi - {self.file_name}")
+                self.bucket_layer_slider.configure(from_=0, to=self.voxel_data.shape[0] - 1)
+                self.bucket_layer_slider.set(0)
                 self.update_log(f"Data loaded successfully.")
             except Exception as e:
                 self.update_log(f"Error loading data: {e}")
@@ -101,11 +112,26 @@ class VesuviusKintsugi:
         else:
             self.update_log("No mask data to save.")
 
-    def update_threshold(self, val):
+    def update_threshold_layer(self, layer):
         try:
-            self.threshold = int(float(val))
-            self.bucket_threshold_var.set(f"{self.threshold}")
-            self.update_log(f"Threshold set to {self.threshold}")
+            self.th_layer = int(float(layer))
+            self.bucket_layer_var.set(f"{self.th_layer}")
+
+            # Update the Bucket Threshold Slider to the current layer's threshold value
+            current_threshold = self.threshold[self.th_layer]
+            self.bucket_threshold_var.set(f"{current_threshold}")
+            # You may need to adjust this line depending on how the slider is named in your code
+            self.bucket_threshold_slider.set(current_threshold)  
+
+            self.update_log(f"Layer {self.th_layer} selected, current threshold is {current_threshold}.")
+        except ValueError:
+            self.update_log("Invalid layer value.")
+
+    def update_threshold_value(self, val):
+        try:
+            self.threshold[self.th_layer] = int(float(val))
+            self.bucket_threshold_var.set(f"{int(float(val))}")
+            self.update_log(f"Layer {self.th_layer} threshold set to {self.threshold[self.th_layer]}.")
         except ValueError:
             self.update_log("Invalid threshold value.")
 
@@ -124,7 +150,7 @@ class VesuviusKintsugi:
         visited = set()
 
         counter = 0
-        while self.flood_fill_active and queue:
+        while self.flood_fill_active and queue and counter < self.max_propagation_steps:
             cz, cy, cx = queue.popleft()
 
             if (cz, cy, cx) in visited or not (0 <= cz < self.voxel_data.shape[0] and 0 <= cy < self.voxel_data.shape[1] and 0 <= cx < self.voxel_data.shape[2]):
@@ -132,7 +158,10 @@ class VesuviusKintsugi:
 
             visited.add((cz, cy, cx))
 
-            if abs(int(self.voxel_data[cz, cy, cx]) - int(target_color)) <= self.threshold:
+            if self.barrier_mask[cz, cy, cx] != 0:
+                continue
+
+            if abs(int(self.voxel_data[cz, cy, cx]) - int(target_color)) <= self.threshold[cz]:
                 self.mask_data[cz, cy, cx] = 1
                 counter += 1
                 for dz in [-1, 0, 1]:
@@ -195,7 +224,7 @@ class VesuviusKintsugi:
         aspect_ratio = original_height / original_width
         new_height = int(target_width * aspect_ratio)
         new_height = min(new_height, target_height)
-        return image.resize((zoomed_width, zoomed_height), Image.NEAREST)
+        return image.resize((zoomed_width, zoomed_height), Image.Resampling.NEAREST)
 
     def update_display_slice(self):
         if self.voxel_data is not None:
@@ -210,13 +239,22 @@ class VesuviusKintsugi:
 
             # Only overlay the mask if show_mask is True
             if self.mask_data is not None and self.show_mask:
-                mask = np.uint8(self.mask_data[self.z_index, :, :] * 255)
+                mask = np.uint8(self.mask_data[self.z_index, :, :] * self.overlay_alpha)
                 yellow = np.zeros_like(mask, dtype=np.uint8)
                 yellow[:, :] = 255  # Yellow color
                 mask_img = Image.fromarray(np.stack([yellow, yellow, np.zeros_like(mask), mask], axis=-1), 'RGBA')
 
                 # Overlay the mask on the original image
                 img = Image.alpha_composite(img, mask_img)
+
+            if self.barrier_mask is not None and self.show_barrier:
+                barrier = np.uint8(self.barrier_mask[self.z_index, :, :] * self.overlay_alpha)
+                red = np.zeros_like(barrier, dtype=np.uint8)
+                red[:, :] = 255  # Red color
+                barrier_img = Image.fromarray(np.stack([red, np.zeros_like(barrier), np.zeros_like(barrier), barrier], axis=-1), 'RGBA')
+
+                # Overlay the barrier mask on the original image
+                img = Image.alpha_composite(img, barrier_img)
 
             # Resize the image with aspect ratio
             img = self.resize_with_aspect(img, target_width_xy, target_height_xy, zoom=self.zoom_level)
@@ -297,17 +335,15 @@ class VesuviusKintsugi:
             min_y = max(0, center_y - self.pencil_size)
             max_y = min(self.voxel_data.shape[1] - 1, center_y + self.pencil_size)
 
-            if self.mode.get() == "pencil":
-                mask_value = 1
-            elif self.mode.get() == "eraser":
-                mask_value = 0
-            else:
-                self.update_log("Something wrong with pencil/eraser.")
+        if self.mode.get() in ["pencil", "eraser"]:
+            # Decide which mask to edit based on editing_barrier flag
+            target_mask = self.barrier_mask if self.editing_barrier else self.mask_data
+            mask_value = 1 if self.mode.get() == "pencil" else 0
             for y in range(min_y, max_y + 1):
                 for x in range(min_x, max_x + 1):
                     # Check if the pixel is within the circle's radius
                     if math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2) <= self.pencil_size:
-                        self.mask_data[z_index, y, x] = mask_value
+                            target_mask[z_index, y, x] = mask_value
             self.update_display_slice()
 
     
@@ -323,7 +359,7 @@ class VesuviusKintsugi:
             self.update_display_slice()
 
         if self.mode.get() == "pencil":
-            color = "yellow"
+            color = "yellow" if not self.editing_barrier else "red"
         if self.mode.get() == "eraser":
             color = "white"
         if self.mode.get() == "eraser" or self.mode.get() == "pencil":
@@ -372,6 +408,15 @@ class VesuviusKintsugi:
         self.update_display_slice()
         self.update_log(f"Label {'shown' if self.show_mask else 'hidden'}.\n")
 
+    def toggle_barrier(self):
+        # Toggle the state
+        self.show_barrier = not self.show_barrier
+        # Update the variable for the Checkbutton
+        self.show_barrier_var.set(self.show_barrier)
+        # Update the display to reflect the new state
+        self.update_display_slice()
+        self.update_log(f"Barrier {'shown' if self.show_barrier else 'hidden'}.\n")
+
     def toggle_image(self):
         # Toggle the state
         self.show_image = not self.show_image
@@ -381,51 +426,81 @@ class VesuviusKintsugi:
         self.update_display_slice()
         self.update_log(f"Image {'shown' if self.show_image else 'hidden'}.\n")
 
+    def toggle_editing_mode(self):
+        # Toggle between editing label and barrier
+        self.editing_barrier = not self.editing_barrier
+        self.update_log(f"Editing {'Barrier' if self.editing_barrier else 'Label'}")
+
+    def update_alpha(self, val):
+        self.overlay_alpha = int(float(val))
+        self.update_display_slice()
+
     def show_help(self):
         help_window = tk.Toplevel(self.root)
         help_window.title("Info")
-        help_window.geometry("300x700")  # Adjust size as necessary
-        help_window.resizable(False, False)
+        help_window.geometry("800x700")  # Adjust size as necessary
+        help_window.resizable(True, True)
+
+        # Text widget with a vertical scrollbar
+        help_text_widget = tk.Text(help_window, wrap="word", width=40, height=30)  # Adjust width and height as needed
+        help_text_scrollbar = tk.Scrollbar(help_window, command=help_text_widget.yview)
+        help_text_widget.configure(yscrollcommand=help_text_scrollbar.set)
+
+        # Pack the scrollbar and text widget
+        help_text_scrollbar.pack(side="right", fill="y")
+        help_text_widget.pack(side="left", fill="both", expand=True)
+
 
         info_text = """Vesuvius Kintsugi: A tool for labeling 3D Zarr images for the Vesuvius Challenge (scrollprize.org).
 
-        Pour the gold into the crackles!
+Commands Overview:
+- Icons (Top, Left to Right):
+  1. Open Zarr 3D Image: Load image data from a Zarr directory.
+  2. Open Zarr 3D Label: Load label data from a Zarr directory.
+  3. Save Zarr 3D Label: Save current label data to a Zarr file.
+  4. Undo Last Action: Revert the last change made to the label or barrier.
+  5. Brush Tool: Edit labels or barriers with a freehand brush.
+  6. Eraser Tool: Erase parts of the label or barrier.
+  7. Edit Barrier: Toggle between editing the label or the barrier mask.
+  8. Pencil Size: Adjust the size of the brush and eraser tools.
+  9. 3D Flood Fill Tool: Fill an area with the label based on similarity.
+  10. STOP: Interrupt the ongoing flood fill operation.
+  11. Info: Display information and usage tips.
 
-        Commands Overview:
-        - Icons (Left to Right): 
-        1. Open Zarr 3D Image
-        2. Open Zarr 3D Label
-        3. Save Zarr 3D Label
-        4. Undo Last Action
-        5. Brush Tool
-        6. Eraser Tool
-        7. 'Pour Gold' (3D Bucket)
-        8. STOP (Halts Gold Pouring)
-        9. Pencil Size Selector
-        10. Gold Pouring Threshold
-        11. Info
+- Sliders and Toggles (Bottom):
+  1. Toggle Label: Show or hide the label overlay.
+  2. Toggle Barrier: Show or hide the barrier overlay.
+  3. Opacity: Adjust the transparency of the label and barrier overlays.
+  4. Toggle Image: Show or hide the image data.
+  5. Bucket Layer: Select the layer to adjust its specific flood fill threshold.
+  6. Bucket Threshold: Set the threshold for the flood fill tool.
+  7. Max Propagation: Limit the extent of the flood fill operation.
 
-        - Bottom
-        1. Toggle Label/Image (Side-by-side buttons for showing/hiding Labeling or Image)
+Usage Tips:
+- Pouring Gold: The 3D flood fill algorithm labels contiguous areas based on voxel intensity and the set threshold.
+    The gold does not propagate into the barrier.
+- Navigation: Click and drag with the left mouse button to pan the image.
+- Zoom: Use CTRL+Scroll to zoom in and out. Change the Z-axis slice with the mouse wheel.
+- Editing Modes: Use the "Edit Barrier" toggle to switch between modifying the label and the barrier mask.
+- Overlay Visibility: Use the toggle buttons to show or hide the label, barrier, and image data for easier editing.
+- Tool Size: Use the "Pencil Size" slider to adjust the size of the brush and eraser.
 
-        Usage Tips:
-        - Pouring Gold: Propagates gold in 3D based on neighbor voxel values and threshold.
-        - Navigation: Drag with left mouse button.
-        - Tools: Use right mouse button for brush, eraser and gold pouring.
-        - Zoom: CTRL+Scroll. Change Z-axis slice with mouse wheel.
-        - Toggle Buttons: The 'Toggle Label' and 'Toggle Image' buttons appear pressed when active, indicating visibility of labels or the image respectively.
+Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D voxel image labeling. Released under the MIT license.
+"""
+        # Insert the help text into the text widget and disable editing
+        help_text_widget.insert("1.0", info_text)
 
-        Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D voxel image labeling. Released under the MIT license."""
-
-        label = tk.Label(help_window, text=info_text, wraplength=250)
-        label.pack(pady=10, padx=10)
-
-        close_button = tk.Button(help_window, text="Close", command=help_window.destroy)
-        close_button.pack(pady=10)
+    def update_max_propagation(self, val):
+        self.max_propagation_steps = int(float(val))
+        self.max_propagation_var.set(f"{self.max_propagation_steps}")
+        self.update_log(f"Max Propagation Steps set to {self.max_propagation_steps}")
 
     def update_log(self, message):
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)  # Scroll to the bottom
+        if self.log_text is not None:
+            self.log_text.insert(tk.END, message + "\n")
+            self.log_text.see(tk.END)
+        else:
+            print(f"Log not ready: {message}")
 
     @staticmethod
     def create_tooltip(widget, text):
@@ -463,11 +538,11 @@ class VesuviusKintsugi:
         style.configure('TFrame', padding=5)  # Add padding around frames
 
         # Create a toolbar frame at the top with some padding
-        toolbar_frame = ttk.Frame(self.root, padding="5 5 5 5")
-        toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+        self.toolbar_frame = ttk.Frame(self.root, padding="5 5 5 5")
+        self.toolbar_frame.pack(side=tk.TOP, fill=tk.X)
 
         # Create a drawing tools frame
-        drawing_tools_frame = tk.Frame(toolbar_frame)
+        drawing_tools_frame = tk.Frame(self.toolbar_frame)
         drawing_tools_frame.pack(side=tk.LEFT, padx=5)
 
         # Load and set icons for buttons (icons need to be added)
@@ -484,79 +559,84 @@ class VesuviusKintsugi:
         self.mode = tk.StringVar(value="bucket")
 
         # Add buttons with icons and tooltips to the toolbar frame
-        load_button = ttk.Button(toolbar_frame, image=load_icon, command=self.load_data)
+        load_button = ttk.Button(self.toolbar_frame, image=load_icon, command=self.load_data)
         load_button.image = load_icon
         load_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(load_button, "Open Zarr 3D Image")
 
-        load_mask_button = ttk.Button(toolbar_frame, image=load_mask_icon, command=self.load_mask)
+        load_mask_button = ttk.Button(self.toolbar_frame, image=load_mask_icon, command=self.load_mask)
         load_mask_button.image = load_mask_icon
         load_mask_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(load_mask_button, "Load Ink Label")
 
-        save_button = ttk.Button(toolbar_frame, image=save_icon, command=self.save_image)
+        save_button = ttk.Button(self.toolbar_frame, image=save_icon, command=self.save_image)
         save_button.image = save_icon
         save_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(save_button, "Save Zarr 3D Label")
 
-        undo_button = ttk.Button(toolbar_frame, image=undo_icon, command=self.undo_last_action)
+        undo_button = ttk.Button(self.toolbar_frame, image=undo_icon, command=self.undo_last_action)
         undo_button.image = undo_icon
         undo_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(undo_button, "Undo Last Action")
 
         # Brush tool button
-        brush_button = ttk.Radiobutton(toolbar_frame, image=brush_icon, variable=self.mode, value="pencil")
+        brush_button = ttk.Radiobutton(self.toolbar_frame, image=brush_icon, variable=self.mode, value="pencil")
         brush_button.image = brush_icon
         brush_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(brush_button, "Brush Tool")
 
         # Eraser tool button
-        eraser_button = ttk.Radiobutton(toolbar_frame, image=eraser_icon, variable=self.mode, value="eraser")
+        eraser_button = ttk.Radiobutton(self.toolbar_frame, image=eraser_icon, variable=self.mode, value="eraser")
         eraser_button.image = eraser_icon
         eraser_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(eraser_button, "Eraser Tool")
 
+        self.editing_barrier_var = tk.BooleanVar(value=self.editing_barrier)
+        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Barrier", command=self.toggle_editing_mode, variable=self.editing_barrier_var)
+        toggle_editing_button.pack(side=tk.LEFT, padx=5)
+
+        self.pencil_size_var = tk.StringVar(value="0")  # Default pencil size
+        pencil_size_label = ttk.Label(self.toolbar_frame, text="Pencil Size:")
+        pencil_size_label.pack(side=tk.LEFT, padx=(10, 2))  # Add some padding for spacing
+
+        pencil_size_slider = ttk.Scale(self.toolbar_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.update_pencil_size)
+        pencil_size_slider.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(pencil_size_slider, "Adjust Pencil Size")
+
+        pencil_size_value_label = ttk.Label(self.toolbar_frame, textvariable=self.pencil_size_var)
+        pencil_size_value_label.pack(side=tk.LEFT, padx=(0, 10))
+
         # Bucket tool button
-        bucket_button = ttk.Radiobutton(toolbar_frame, image=bucket_icon, variable=self.mode, value="bucket")
+        bucket_button = ttk.Radiobutton(self.toolbar_frame, image=bucket_icon, variable=self.mode, value="bucket")
         bucket_button.image = bucket_icon
         bucket_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(bucket_button, "Flood Fill Tool")
 
         # Stop tool button
-        stop_button = ttk.Button(toolbar_frame, image=stop_icon, command=self.stop_flood_fill)
+        stop_button = ttk.Button(self.toolbar_frame, image=stop_icon, command=self.stop_flood_fill)
         stop_button.image = stop_icon
         stop_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(stop_button, "Stop Flood Fill")
 
         # Help button
-        help_button = ttk.Button(toolbar_frame, image=help_icon, command=self.show_help)
+        help_button = ttk.Button(self.toolbar_frame, image=help_icon, command=self.show_help)
         help_button.image = help_icon
         help_button.pack(side=tk.RIGHT, padx=2)
         self.create_tooltip(help_button, "Info")
 
-        self.pencil_size_var = tk.StringVar(value="0")  # Default pencil size
-        pencil_size_label = ttk.Label(toolbar_frame, text="Pencil Size:")
-        pencil_size_label.pack(side=tk.LEFT, padx=(10, 2))  # Add some padding for spacing
-
-        pencil_size_slider = ttk.Scale(toolbar_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.update_pencil_size)
-        pencil_size_slider.pack(side=tk.LEFT, padx=2)
-        self.create_tooltip(pencil_size_slider, "Adjust Pencil Size")
-
-        pencil_size_value_label = ttk.Label(toolbar_frame, textvariable=self.pencil_size_var)
-        pencil_size_value_label.pack(side=tk.LEFT, padx=(0, 10))
-
         # Bucket Threshold Slider
+        '''
         self.bucket_threshold_var = tk.StringVar(value="4")  # Default threshold
-        bucket_threshold_label = ttk.Label(toolbar_frame, text="Bucket Threshold:")
+        bucket_threshold_label = ttk.Label(self.toolbar_frame, text="Bucket Threshold:")
         bucket_threshold_label.pack(side=tk.LEFT, padx=(10, 2))  # Add some padding for spacing
 
-        bucket_threshold_slider = ttk.Scale(toolbar_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.update_threshold)
-        bucket_threshold_slider.pack(side=tk.LEFT, padx=2)
-        self.create_tooltip(bucket_threshold_slider, "Adjust Bucket Threshold")
+        self.bucket_threshold_slider = ttk.Scale(self.toolbar_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.update_threshold_value)
+        self.bucket_threshold_slider.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(self.bucket_threshold_slider, "Adjust Bucket Threshold")
 
-        bucket_threshold_value_label = ttk.Label(toolbar_frame, textvariable=self.bucket_threshold_var)
+        bucket_threshold_value_label = ttk.Label(self.toolbar_frame, textvariable=self.bucket_threshold_var)
         bucket_threshold_value_label.pack(side=tk.LEFT, padx=(0, 10))
-
+        '''
         # The canvas itself remains in the center
         self.canvas = tk.Canvas(self.root, width=400, height=400, bg='white')
         self.canvas.pack(fill='both', expand=True)
@@ -579,6 +659,7 @@ class VesuviusKintsugi:
 
         # Variables for toggling states
         self.show_mask_var = tk.BooleanVar(value=self.show_mask)
+        self.show_barrier_var = tk.BooleanVar(value=self.show_barrier)
         self.show_image_var = tk.BooleanVar(value=self.show_image)
 
         # Create a frame to hold the toggle buttons
@@ -589,8 +670,61 @@ class VesuviusKintsugi:
         toggle_mask_button = ttk.Checkbutton(toggle_frame, text="Toggle Label", command=self.toggle_mask, variable=self.show_mask_var)
         toggle_mask_button.pack(side=tk.LEFT, padx=5, anchor='s')
 
+        toggle_barrier_button = ttk.Checkbutton(toggle_frame, text="Toggle Barrier", command=self.toggle_barrier, variable=self.show_barrier_var)
+        toggle_barrier_button.pack(side=tk.LEFT, padx=5, anchor='s')
+
+        # Slider for adjusting the alpha (opacity)
+        self.alpha_var = tk.IntVar(value=self.overlay_alpha)
+        alpha_label = ttk.Label(toggle_frame, text="Opacity:")
+        alpha_label.pack(side=tk.LEFT, padx=5, anchor='s')
+        alpha_slider = ttk.Scale(toggle_frame, from_=0, to=255, orient=tk.HORIZONTAL, command=self.update_alpha)
+        alpha_slider.set(self.overlay_alpha)  # Set the default position of the slider
+        alpha_slider.pack(side=tk.LEFT, padx=5, anchor='s')
+        self.create_tooltip(alpha_slider, "Adjust Overlay Opacity")
+
         toggle_image_button = ttk.Checkbutton(toggle_frame, text="Toggle Image", command=self.toggle_image, variable=self.show_image_var)
         toggle_image_button.pack(side=tk.LEFT, padx=5, anchor='s')
+
+        # Create a frame specifically for the sliders
+        slider_frame = ttk.Frame(toggle_frame)
+        slider_frame.pack(side=tk.RIGHT, padx=5)
+
+        # Bucket Layer Slider
+        self.bucket_layer_var = tk.StringVar(value="0")
+        bucket_layer_label = ttk.Label(slider_frame, text="Bucket Layer:")
+        bucket_layer_label.pack(side=tk.LEFT, padx=(10, 2))
+
+        self.bucket_layer_slider = ttk.Scale(slider_frame, from_=0, to=0, orient=tk.HORIZONTAL, command=self.update_threshold_layer)
+        self.bucket_layer_slider.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(self.bucket_layer_slider, "Adjust Bucket Layer")
+
+        bucket_layer_value_label = ttk.Label(slider_frame, textvariable=self.bucket_layer_var)
+        bucket_layer_value_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Bucket Threshold Slider
+        self.bucket_threshold_var = tk.StringVar(value="4")
+        bucket_threshold_label = ttk.Label(slider_frame, text="Bucket Threshold:")
+        bucket_threshold_label.pack(side=tk.LEFT, padx=(10, 2))
+
+        self.bucket_threshold_slider = ttk.Scale(slider_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.update_threshold_value)
+        self.bucket_threshold_slider.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(self.bucket_threshold_slider, "Adjust Bucket Threshold")
+
+        bucket_threshold_value_label = ttk.Label(slider_frame, textvariable=self.bucket_threshold_var)
+        bucket_threshold_value_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Max Propagation Slider
+        self.max_propagation_var = tk.IntVar(value=self.max_propagation_steps)
+        max_propagation_label = ttk.Label(slider_frame, text="Max Propagation:")
+        max_propagation_label.pack(side=tk.LEFT, padx=(10, 2))
+
+        max_propagation_slider = ttk.Scale(slider_frame, from_=1, to=500, orient=tk.HORIZONTAL, command=self.update_max_propagation)
+        max_propagation_slider.set(self.max_propagation_steps)
+        max_propagation_slider.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(max_propagation_slider, "Adjust Max Propagation Steps for Flood Fill")
+
+        max_propagation_value_label = ttk.Label(slider_frame, textvariable=self.max_propagation_var)
+        max_propagation_value_label.pack(side=tk.LEFT, padx=(0, 10))
 
         # Create a frame for the log text area and scrollbar
         log_frame = tk.Frame(self.root)

@@ -12,19 +12,23 @@ POUR GOLD INTO THE CRACKLES!
 ### Interactive UI
 - A graphical user interface that enables users to navigate through 3D Zarr data.
 - Tools for labeling including brush, eraser, and flood fill (3D bucket).
-- Functionality to toggle the visibility of labels and original images.
+- Toggle visibility of labels, barrier masks, and original images.
+- Adjust the transparency of label and barrier overlays.
 - Undo feature to revert the last action.
+- Switch between editing labels and barrier masks.
 
-### Flood Fill Algorithm
-- A 3D flood fill algorithm for segmenting contiguous structures within the volumetric data.
-- Adjustable parameters such as intensity threshold and selection size.
+### Advanced Labeling Features
+- A 3D flood fill algorithm to segment contiguous structures within the data.
+- Configurable settings such as intensity threshold, bucket layer selection, and maximum propagation steps for precise control.
+- Edit barrier masks to prevent the flood fill algorithm from propagating into restricted areas.
 
 ### Efficient Data Handling
 - Loading and saving of Zarr formatted data directly from and to disk.
 
-### Accessibility
-- User-friendly controls with tooltips for guidance.
-- A dedicated help window with detailed instructions on tool usage.
+### Accessibility and Assistance
+- Tooltips provide guidance for each control.
+- A help window offers detailed tool usage instructions.
+- The interface is designed to be user-friendly and intuitive.
 
 ### Letter dataset
 - A small Zarr dataset of cropped letters from Scroll 1 to practice labeling
@@ -45,7 +49,7 @@ python kintsugi.py
 Use the provided buttons to load Zarr data, navigate through slices, label regions, and save your work. The interface supports various annotation strategies suitable for different types of 3D structures.
 
 ## Customization
-Customize the pencil size, and flood fill threshold directly from the UI to adapt the tool's behavior to your specific data and labeling requirements.
+Directly customize the pencil size, flood fill threshold, and maximum propagation steps from the UI to tailor the tool's behavior to your specific data and labeling needs.
 
 ## Contributing
 We encourage contributions to enhance the functionality of Vesuvius Kintsugi.
