@@ -232,7 +232,7 @@ class VesuviusKintsugi:
         self.canvas.itemconfigure(self.z_slice_text, text=f"Z-Slice: {self.z_index}")
         if self.click_coordinates:
             try:
-                cursor_x, cursor_y, _ = self.calculate_image_coordinates(self.click_coordinates)
+                _, cursor_y, cursor_x = self.calculate_image_coordinates(self.click_coordinates)
             except:
                 cursor_x, cursor_y = 0, 0
             self.canvas.itemconfigure(self.cursor_pos_text, text=f"Cursor Position: ({cursor_x}, {cursor_y})")
