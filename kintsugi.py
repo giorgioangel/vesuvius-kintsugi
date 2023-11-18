@@ -374,26 +374,28 @@ class VesuviusKintsugi:
         if sys.platform.startswith('win'):
             # Windows
             ctrl_pressed = event.state & 0x0004
+            delta = event.delta
         elif sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
             # Linux or macOS
             ctrl_pressed = event.state & 4
+            delta = 1 if event.num == 4 else -1
 
         if ctrl_pressed:
-            self.zoom(event)
+            self.zoom(delta)
         else:
-            self.scroll(event)
+            self.scroll(delta)
 
-    def scroll(self, event):
+    def scroll(self, delta):
         if self.voxel_data is not None:
             # Update the z_index based on scroll direction
-            delta = 1 if event.delta > 0 else -1
+            delta = 1 if delta > 0 else -1
             self.z_index = max(0, min(self.z_index + delta, self.voxel_data.shape[0] - 1))
             self.update_display_slice()
 
-    
-    def zoom(self, event):
+
+    def zoom(self, delta):
         zoom_amount = 0.1  # Adjust the zoom sensitivity as needed
-        if event.delta > 0:
+        if delta > 0:
             self.zoom_level = min(self.max_zoom_level, self.zoom_level + zoom_amount)
         else:
             self.zoom_level = max(1, self.zoom_level - zoom_amount)
@@ -656,6 +658,9 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         self.canvas.bind("<ButtonRelease-3>", self.on_canvas_release)
         self.canvas.bind("<Button-3>", self.on_canvas_click)  # Assuming on_canvas_click is implemented
         self.canvas.bind("<MouseWheel>", self.scroll_or_zoom)  # Assuming scroll_or_zoom is implemented
+        # On Linux, Button-4 is scroll up and Button-5 is scroll down
+        self.canvas.bind("<Button-4>", self.scroll_or_zoom)
+        self.canvas.bind("<Button-5>", self.scroll_or_zoom)
 
         # Variables for toggling states
         self.show_mask_var = tk.BooleanVar(value=self.show_mask)
