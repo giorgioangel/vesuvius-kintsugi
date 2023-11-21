@@ -57,7 +57,7 @@ class VesuviusKintsugi:
             # Check if the directory contains Zarr or TIFF files
             if os.path.exists(os.path.join(dir_path, '.zarray')):
                 # Load the Zarr data into the voxel_data attribute
-                self.voxel_data = zarr.open(dir_path, mode='r')
+                self.voxel_data = np.array(zarr.open(dir_path, mode='r'))
             elif glob.glob(os.path.join(dir_path, '*.tif')):
                 # Load TIFF slices into a 3D numpy array using memory-mapped files
                 tiff_files = sorted(glob.glob(os.path.join(dir_path, '*.tif')), key=lambda x: int(os.path.basename(x).split('.')[0]))
