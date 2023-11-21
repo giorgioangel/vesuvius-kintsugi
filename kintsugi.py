@@ -1,4 +1,6 @@
 import tkinter as tk
+import glob
+import tifffile
 from tkinter import filedialog, PhotoImage, ttk
 from PIL import Image, ImageTk
 import numpy as np
@@ -9,6 +11,8 @@ import math
 import os
 import sys
 
+Image.MAX_IMAGE_PIXELS = None
+
 class VesuviusKintsugi:
     def __init__(self):
         self.overlay_alpha = 255
@@ -17,6 +21,7 @@ class VesuviusKintsugi:
         self.max_propagation_steps = 100  # Default maximum propagation steps
         self.show_barrier = True
         self.voxel_data = None
+        self.prediction_data = None
         self.photo_img = None
         self.th_layer = 0
         self.resized_img = None
@@ -38,35 +43,85 @@ class VesuviusKintsugi:
         self.mask_data = None
         self.show_mask = True  # Default to showing the mask
         self.show_image = True
+        self.show_prediction = True
+        self.initial_load = True
         self.init_ui()
 
     def load_data(self):
-        # Ask the user to select a directory containing Zarr data
-        dir_path = filedialog.askdirectory(title="Select Zarr Directory")
-        if dir_path:
-            try:
+        dir_path = filedialog.askdirectory(title="Select Directory")
+
+        if not dir_path:
+            return
+
+        try:
+            # Check if the directory contains Zarr or TIFF files
+            if os.path.exists(os.path.join(dir_path, '.zarray')):
                 # Load the Zarr data into the voxel_data attribute
-                self.voxel_data = np.array(zarr.open(dir_path, mode='r'))
-                self.mask_data = np.zeros_like(self.voxel_data)
-                self.barrier_mask = np.zeros_like(self.voxel_data)
-                self.z_index = 0
-                if self.voxel_data is not None:
-                    self.threshold = [10 for _ in range(self.voxel_data.shape[0])]
-                self.update_display_slice()
-                self.file_name = os.path.basename(dir_path)
-                self.root.title(f"Vesuvius Kintsugi - {self.file_name}")
-                self.bucket_layer_slider.configure(from_=0, to=self.voxel_data.shape[0] - 1)
-                self.bucket_layer_slider.set(0)
-                self.update_log(f"Data loaded successfully.")
+                self.voxel_data = zarr.open(dir_path, mode='r')
+            elif glob.glob(os.path.join(dir_path, '*.tif')):
+                # Load TIFF slices into a 3D numpy array using memory-mapped files
+                tiff_files = sorted(glob.glob(os.path.join(dir_path, '*.tif')), key=lambda x: int(os.path.basename(x).split('.')[0]))
+                slices = [tifffile.memmap(f) for f in tiff_files]
+                self.voxel_data = np.stack(slices, axis=0)
+                self.update_log(f"Data loaded successfully {self.voxel_data.shape}.")
+            else:
+                self.update_log("Directory does not contain recognizable Zarr or TIFF files.")
+                return
+
+            self.mask_data = np.zeros_like(self.voxel_data)
+            self.barrier_mask = np.zeros_like(self.voxel_data)
+            self.z_index = 0
+            if self.voxel_data is not None:
+                self.threshold = [10 for _ in range(self.voxel_data.shape[0])]
+            self.initial_load = True
+            self.update_display_slice()
+            self.file_name = os.path.basename(dir_path)
+            self.root.title(f"Vesuvius Kintsugi - {self.file_name}")
+            self.bucket_layer_slider.configure(from_=0, to=self.voxel_data.shape[0] - 1)
+            self.bucket_layer_slider.set(0)
+            self.update_log(f"Data loaded successfully.")
+        except Exception as e:
+            self.update_log(f"Error loading data: {e}")
+
+    def load_prediction(self):
+        if self.voxel_data is None:
+            self.update_log("No voxel data loaded. Load voxel data first.")
+            return
+
+        # File dialog to select prediction PNG file
+        pred_file_path = filedialog.askopenfilename(title="Select Prediction PNG", filetypes=[("PNG files", "*.png")])
+
+        if pred_file_path:
+            try:
+                # Load the prediction PNG file
+                loaded_prediction = Image.open(pred_file_path)
+                
+                # Convert the image to a NumPy array
+                prediction_data_np = np.array(loaded_prediction)
+                
+                # Calculate padding and remove it
+                '''
+                pad0 = (64 - self.voxel_data.shape[1] % 64) # 64 tile size
+                pad1 = (64 - self.voxel_data.shape[2] % 64)
+                if pad0 or pad1:
+                    prediction_data_np = prediction_data_np[:-pad0, :-pad1]
+                '''
+                self.prediction_data = prediction_data_np
+                # Check if the dimensions match
+                if self.prediction_data.shape[:2] == self.voxel_data.shape[1:]:
+                    self.update_display_slice()
+                    self.update_log("Prediction loaded successfully.")
+                else:
+                    self.update_log("Error: Prediction dimensions do not match the voxel data dimensions.")
             except Exception as e:
-                self.update_log(f"Error loading data: {e}")
+                self.update_log(f"Error loading prediction: {e}")
 
     def load_mask(self):
         if self.voxel_data is None:
             self.update_log("No voxel data loaded. Load voxel data first.")
             return
 
-        # Prompt to save changes if there are any unsaved changes
+            # Prompt to save changes if there are any unsaved changes
         if self.history:
             if not tk.messagebox.askyesno("Unsaved Changes", "You have unsaved changes. Do you want to continue without saving?"):
                 return
@@ -74,11 +129,11 @@ class VesuviusKintsugi:
         # File dialog to select mask file
         mask_file_path = filedialog.askdirectory(
             title="Select Label Zarr File")
-        
+            
 
         if mask_file_path:
             try:
-                loaded_mask = np.array(zarr.open(mask_file_path, mode='r'))
+                loaded_mask = zarr.open(mask_file_path, mode='r')
                 if loaded_mask.shape == self.voxel_data.shape:
                     self.mask_data = loaded_mask
                     self.update_display_slice()
@@ -86,7 +141,7 @@ class VesuviusKintsugi:
                 else:
                     self.update_log("Error: Label dimensions do not match the voxel data dimensions.")
             except Exception as e:
-                self.update_log(f"Error loading mask: {e}")
+                    self.update_log(f"Error loading mask: {e}")
 
     def save_image(self):
         if self.mask_data is not None:
@@ -186,11 +241,11 @@ class VesuviusKintsugi:
         if self.voxel_data is not None:
             if len(self.history) == self.max_history_size:
                 self.history.pop(0)  # Remove the oldest state
-            self.history.append((self.voxel_data.copy(), self.mask_data.copy()))
+            self.history.append(self.mask_data.copy())
 
     def undo_last_action(self):
         if self.history:
-            self.voxel_data, self.mask_data = self.history.pop() 
+            self.mask_data = self.history.pop() 
             self.update_display_slice()
             self.update_log("Last action undone.")
         else:
@@ -226,16 +281,38 @@ class VesuviusKintsugi:
         new_height = min(new_height, target_height)
         return image.resize((zoomed_width, zoomed_height), Image.Resampling.NEAREST)
 
+    def resize_to_fit_canvas(self, image, canvas_width, canvas_height):
+        """Resize image to fit the canvas while maintaining aspect ratio."""
+        original_width, original_height = image.size
+        aspect_ratio = original_width / original_height
+
+        if canvas_width / canvas_height > aspect_ratio:
+            new_width = int(aspect_ratio * canvas_height)
+            new_height = canvas_height
+        else:
+            new_width = canvas_width
+            new_height = int(canvas_width / aspect_ratio)
+
+        self.zoom_level = min(new_width / original_width, new_height / original_height)
+
+        return image.resize((new_width, new_height), Image.Resampling.NEAREST)
+    
     def update_display_slice(self):
         if self.voxel_data is not None:
             target_width_xy = self.canvas.winfo_width()
             target_height_xy = self.canvas.winfo_height()
-
+                      
             # Convert the current slice to an RGBA image
             if self.show_image:
-                img = Image.fromarray(self.voxel_data[self.z_index, :, :].astype('uint16')).convert('RGBA')
+                # Normalize the uint16 data to uint8
+                if self.voxel_data.dtype == np.uint16:
+                    img_data = self.voxel_data[self.z_index, :, :].astype('float32')
+                    img_data = (img_data / np.max(img_data) * 255).astype('uint8')
+                else:
+                    img_data = self.voxel_data[self.z_index, :, :].astype('uint8')
+                img = Image.fromarray(img_data).convert('L').convert('RGBA')
             else:
-                img = Image.fromarray(np.zeros_like(self.voxel_data[self.z_index, :, :]).astype('uint16')).convert('RGBA')
+                img = Image.fromarray(np.zeros_like(self.voxel_data[self.z_index, :, :], dtype='uint8')).convert('RGBA')
 
             # Only overlay the mask if show_mask is True
             if self.mask_data is not None and self.show_mask:
@@ -256,8 +333,21 @@ class VesuviusKintsugi:
                 # Overlay the barrier mask on the original image
                 img = Image.alpha_composite(img, barrier_img)
 
-            # Resize the image with aspect ratio
-            img = self.resize_with_aspect(img, target_width_xy, target_height_xy, zoom=self.zoom_level)
+            if self.prediction_data is not None and self.show_prediction:
+                pred = np.uint8(self.prediction_data[:, :] * self.overlay_alpha)
+                blue = np.zeros_like(pred, dtype=np.uint8)
+                blue[:, :] = 255  # Red color
+                pred_img = Image.fromarray(np.stack([np.zeros_like(pred), np.zeros_like(pred), blue, pred], axis=-1), 'RGBA')
+
+                # Overlay the barrier mask on the original image
+                img = Image.alpha_composite(img, pred_img)
+
+                    # Resize the image with aspect ratio
+            if self.initial_load:
+                img = self.resize_to_fit_canvas(img, target_width_xy, target_height_xy)
+                self.initial_load = False
+            else:
+                img = self.resize_with_aspect(img, target_width_xy, target_height_xy, zoom=self.zoom_level)
 
             # Convert back to a format that can be displayed in Tkinter
             self.resized_img = img.convert('RGB')
@@ -428,6 +518,15 @@ class VesuviusKintsugi:
         self.update_display_slice()
         self.update_log(f"Image {'shown' if self.show_image else 'hidden'}.\n")
 
+    def toggle_prediction(self):
+        # Toggle the state
+        self.show_prediction = not self.show_prediction
+        # Update the variable for the Checkbutton
+        self.show_prediction_var.set(self.show_prediction)
+        # Update the display to reflect the new state
+        self.update_display_slice()
+        self.update_log(f"Ink predicton {'shown' if self.show_prediction else 'hidden'}.\n")
+
     def toggle_editing_mode(self):
         # Toggle between editing label and barrier
         self.editing_barrier = not self.editing_barrier
@@ -548,15 +647,16 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         drawing_tools_frame.pack(side=tk.LEFT, padx=5)
 
         # Load and set icons for buttons (icons need to be added)
-        load_icon = PhotoImage(file='./icons/open-64.png')  # Replace with actual path to icon
-        save_icon = PhotoImage(file='./icons/save-64.png')  # Replace with actual path to icon
-        undo_icon = PhotoImage(file='./icons/undo-64.png')  # Replace with actual path to icon
-        brush_icon = PhotoImage(file='./icons/brush-64.png')  # Replace with actual path to icon
-        eraser_icon = PhotoImage(file='./icons/eraser-64.png')  # Replace with actual path to icon
+        load_icon = PhotoImage(file='./icons/open-64.png') 
+        save_icon = PhotoImage(file='./icons/save-64.png')
+        prediction_icon = PhotoImage(file='./icons/prediction-64.png')
+        undo_icon = PhotoImage(file='./icons/undo-64.png') 
+        brush_icon = PhotoImage(file='./icons/brush-64.png')
+        eraser_icon = PhotoImage(file='./icons/eraser-64.png')
         bucket_icon = PhotoImage(file='./icons/bucket-64.png')
         stop_icon = PhotoImage(file='./icons/stop-60.png')
         help_icon = PhotoImage(file='./icons/help-48.png')
-        load_mask_icon = PhotoImage(file='./icons/ink-64.png')  # Replace with the actual path to icon
+        load_mask_icon = PhotoImage(file='./icons/ink-64.png')
 
         self.mode = tk.StringVar(value="bucket")
 
@@ -575,6 +675,11 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         save_button.image = save_icon
         save_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(save_button, "Save Zarr 3D Label")
+
+        load_prediction = ttk.Button(self.toolbar_frame, image=prediction_icon, command=self.load_prediction)
+        load_prediction.image = load_icon
+        load_prediction.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(load_prediction, "Load Ink Prediction")
 
         undo_button = ttk.Button(self.toolbar_frame, image=undo_icon, command=self.undo_last_action)
         undo_button.image = undo_icon
@@ -666,17 +771,21 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         self.show_mask_var = tk.BooleanVar(value=self.show_mask)
         self.show_barrier_var = tk.BooleanVar(value=self.show_barrier)
         self.show_image_var = tk.BooleanVar(value=self.show_image)
+        self.show_prediction_var = tk.BooleanVar(value=self.show_prediction)
 
         # Create a frame to hold the toggle buttons
         toggle_frame = tk.Frame(self.root)
         toggle_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=2)
 
         # Create toggle buttons for mask and image visibility
-        toggle_mask_button = ttk.Checkbutton(toggle_frame, text="Toggle Label", command=self.toggle_mask, variable=self.show_mask_var)
+        toggle_mask_button = ttk.Checkbutton(toggle_frame, text="Label", command=self.toggle_mask, variable=self.show_mask_var)
         toggle_mask_button.pack(side=tk.LEFT, padx=5, anchor='s')
 
-        toggle_barrier_button = ttk.Checkbutton(toggle_frame, text="Toggle Barrier", command=self.toggle_barrier, variable=self.show_barrier_var)
+        toggle_barrier_button = ttk.Checkbutton(toggle_frame, text="Barrier", command=self.toggle_barrier, variable=self.show_barrier_var)
         toggle_barrier_button.pack(side=tk.LEFT, padx=5, anchor='s')
+
+        toggle_prediction_button = ttk.Checkbutton(toggle_frame, text="Prediction", command=self.toggle_prediction, variable=self.show_prediction_var)
+        toggle_prediction_button.pack(side=tk.LEFT, padx=5, anchor='s')
 
         # Slider for adjusting the alpha (opacity)
         self.alpha_var = tk.IntVar(value=self.overlay_alpha)
