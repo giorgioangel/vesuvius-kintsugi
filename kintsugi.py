@@ -238,7 +238,7 @@ class VesuviusKintsugi:
 
     def save_state(self):
         # Save the current state of the image before modifying it
-        if self.voxel_data is not None:
+        if self.mask_data is not None:
             if len(self.history) == self.max_history_size:
                 self.history.pop(0)  # Remove the oldest state
             self.history.append(self.mask_data.copy())
