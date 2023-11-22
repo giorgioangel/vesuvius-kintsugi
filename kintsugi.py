@@ -718,7 +718,7 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
 
     def init_ui(self):
         self.root = tk.Tk()
-        self.root.iconbitmap("./icons/favicon.ico")
+        #self.root.iconbitmap("./icons/favicon.ico")
         self.root.title("Vesuvius Kintsugi")
 
         # Use a ttk.Style object to configure style aspects of the application
