@@ -9,6 +9,7 @@ from collections import deque
 import threading
 import math
 import os
+import gc
 import sys
 
 Image.MAX_IMAGE_PIXELS = None
@@ -45,7 +46,31 @@ class VesuviusKintsugi:
         self.show_image = True
         self.show_prediction = True
         self.initial_load = True
+        self.mat_affine = np.eye(3)
+        self.slice_cache = {}
         self.init_ui()
+
+    def prepare_image_slice(self, z_index):
+        """Prepare the image slice for display."""
+        if self.format == 'zarr':
+            if self.voxel_data.dtype == np.uint16:
+                # Convert to float for normalization, then scale and convert to uint8
+                img_data = self.voxel_data[z_index, :, :].astype('float32')
+                img_data = (img_data / img_data.max() * 255).astype('uint8')
+            else:
+                img_data = self.voxel_data[z_index, :, :].astype('uint8')
+
+        elif self.format == 'tiff':
+            if self.voxel_data[0].dtype == np.uint16:
+                # Convert to float for normalization, then scale and convert to uint8
+                img_data = self.voxel_data[z_index][:, :].astype('float32')
+                img_data = (img_data / img_data.max() * 255).astype('uint8')
+            else:
+                img_data = self.voxel_data[z_index][:, :].astype('uint8')
+
+        img = Image.fromarray(img_data).convert('RGBA')
+        self.slice_cache[z_index] = img
+        return img
 
     def load_data(self):
         dir_path = filedialog.askdirectory(title="Select Directory")
@@ -57,27 +82,35 @@ class VesuviusKintsugi:
             # Check if the directory contains Zarr or TIFF files
             if os.path.exists(os.path.join(dir_path, '.zarray')):
                 # Load the Zarr data into the voxel_data attribute
-                self.voxel_data = np.array(zarr.open(dir_path, mode='r'))
+                self.slice_cache = {}
+                gc.collect()
+                self.voxel_data = zarr.open(dir_path, mode='r')
+                self.format = 'zarr'
             elif glob.glob(os.path.join(dir_path, '*.tif')):
                 # Load TIFF slices into a 3D numpy array using memory-mapped files
+                self.slice_cache = {}
+                gc.collect()
                 tiff_files = sorted(glob.glob(os.path.join(dir_path, '*.tif')), key=lambda x: int(os.path.basename(x).split('.')[0]))
-                slices = [tifffile.memmap(f) for f in tiff_files]
-                self.voxel_data = np.stack(slices, axis=0)
-                self.update_log(f"Data loaded successfully {self.voxel_data.shape}.")
+                self.voxel_data = [tifffile.memmap(f) for f in tiff_files]
+                self.format = 'tiff'
+                #self.voxel_data = np.stack(slices, axis=0)
+                self.update_log(f"Data loaded successfully.")
             else:
                 self.update_log("Directory does not contain recognizable Zarr or TIFF files.")
                 return
 
-            self.mask_data = np.zeros_like(self.voxel_data)
-            self.barrier_mask = np.zeros_like(self.voxel_data)
+            self.dimz = len(self.voxel_data)
+            self.dimy, self.dimx = self.voxel_data[0].shape
+            self.mask_data = np.zeros((self.dimz,self.dimy,self.dimx), dtype=np.uint8)
+            self.barrier_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
             self.z_index = 0
             if self.voxel_data is not None:
-                self.threshold = [10 for _ in range(self.voxel_data.shape[0])]
+                self.threshold = [10 for _ in range(self.dimz)]
             self.initial_load = True
             self.update_display_slice()
             self.file_name = os.path.basename(dir_path)
             self.root.title(f"Vesuvius Kintsugi - {self.file_name}")
-            self.bucket_layer_slider.configure(from_=0, to=self.voxel_data.shape[0] - 1)
+            self.bucket_layer_slider.configure(from_=0, to=self.dimz - 1)
             self.bucket_layer_slider.set(0)
             self.update_log(f"Data loaded successfully.")
         except Exception as e:
@@ -87,7 +120,7 @@ class VesuviusKintsugi:
         if self.voxel_data is None:
             self.update_log("No voxel data loaded. Load voxel data first.")
             return
-
+        self.prediction_loaded = False
         # File dialog to select prediction PNG file
         pred_file_path = filedialog.askopenfilename(title="Select Prediction PNG", filetypes=[("PNG files", "*.png")])
 
@@ -108,8 +141,9 @@ class VesuviusKintsugi:
                 '''
                 self.prediction_data = prediction_data_np
                 # Check if the dimensions match
-                if self.prediction_data.shape[:2] == self.voxel_data.shape[1:]:
+                if self.prediction_data.shape[:2] == (self.dimy, self.dimx):
                     self.update_display_slice()
+                    self.prediction_loaded = True
                     self.update_log("Prediction loaded successfully.")
                 else:
                     self.update_log("Error: Prediction dimensions do not match the voxel data dimensions.")
@@ -134,7 +168,7 @@ class VesuviusKintsugi:
         if mask_file_path:
             try:
                 loaded_mask = zarr.open(mask_file_path, mode='r')
-                if loaded_mask.shape == self.voxel_data.shape:
+                if loaded_mask.shape == (self.dimz, self.dimy, self.dimx):
                     self.mask_data = loaded_mask
                     self.update_display_slice()
                     self.update_log("Label loaded successfully.")
@@ -200,7 +234,11 @@ class VesuviusKintsugi:
 
     def flood_fill_3d(self, start_coord):
         self.flood_fill_active = True
-        target_color = self.voxel_data[start_coord]
+        if self.format == 'zarr':
+            target_color = int(self.voxel_data[start_coord])
+        elif self.format == 'tiff':
+            z, y, x = start_coord
+            target_color = int(self.voxel_data[z][y,x])
         queue = deque([start_coord])
         visited = set()
 
@@ -208,15 +246,21 @@ class VesuviusKintsugi:
         while self.flood_fill_active and queue and counter < self.max_propagation_steps:
             cz, cy, cx = queue.popleft()
 
-            if (cz, cy, cx) in visited or not (0 <= cz < self.voxel_data.shape[0] and 0 <= cy < self.voxel_data.shape[1] and 0 <= cx < self.voxel_data.shape[2]):
+            if (cz, cy, cx) in visited or not (0 <= cz < self.dimz and 0 <= cy < self.dimy and 0 <= cx < self.dimx):
                 continue
 
             visited.add((cz, cy, cx))
 
             if self.barrier_mask[cz, cy, cx] != 0:
                 continue
+            
+            if self.format == 'zarr':
+                voxel_value = int(self.voxel_data[cz, cy, cx])
+                print(voxel_value)
 
-            if abs(int(self.voxel_data[cz, cy, cx]) - int(target_color)) <= self.threshold[cz]:
+            elif self.format == 'tiff':
+                voxel_value = int(self.voxel_data[cz][cy, cx])
+            if abs(voxel_value - target_color) <= self.threshold[cz]:
                 self.mask_data[cz, cy, cx] = 1
                 counter += 1
                 for dz in [-1, 0, 1]:
@@ -231,6 +275,7 @@ class VesuviusKintsugi:
         if self.flood_fill_active == True:
             self.flood_fill_active = False
             self.update_log("Flood fill ended.")
+            self.update_display_slice()
 
     def stop_flood_fill(self):
         self.flood_fill_active = False
@@ -254,13 +299,21 @@ class VesuviusKintsugi:
     def on_canvas_press(self, event):
         self.drag_start_x = event.x
         self.drag_start_y = event.y
-
+    '''
     def on_canvas_drag(self, event):
         if self.drag_start_x is not None and self.drag_start_y is not None:
             dx = event.x - self.drag_start_x
             dy = event.y - self.drag_start_y
             self.image_position_x += dx
             self.image_position_y += dy
+            self.drag_start_x, self.drag_start_y = event.x, event.y
+    '''
+
+    def on_canvas_drag(self, event):
+        if self.drag_start_x is not None and self.drag_start_y is not None:
+            dx = event.x - self.drag_start_x
+            dy = event.y - self.drag_start_y
+            self.translate(dx, dy)
             self.update_display_slice()
             self.drag_start_x, self.drag_start_y = event.x, event.y
 
@@ -272,7 +325,8 @@ class VesuviusKintsugi:
     def on_canvas_release(self, event):
         self.drag_start_x = None
         self.drag_start_y = None
-
+        self.update_display_slice()
+        
     def resize_with_aspect(self, image, target_width, target_height, zoom=1):
         original_width, original_height = image.size
         zoomed_width, zoomed_height = int(original_width * zoom), int(original_height * zoom)
@@ -304,15 +358,12 @@ class VesuviusKintsugi:
                       
             # Convert the current slice to an RGBA image
             if self.show_image:
-                # Normalize the uint16 data to uint8
-                if self.voxel_data.dtype == np.uint16:
-                    img_data = self.voxel_data[self.z_index, :, :].astype('float32')
-                    img_data = (img_data / np.max(img_data) * 255).astype('uint8')
+                if self.z_index in self.slice_cache:
+                    img = self.slice_cache[self.z_index]
                 else:
-                    img_data = self.voxel_data[self.z_index, :, :].astype('uint8')
-                img = Image.fromarray(img_data).convert('L').convert('RGBA')
+                    img = self.prepare_image_slice(self.z_index)           
             else:
-                img = Image.fromarray(np.zeros_like(self.voxel_data[self.z_index, :, :], dtype='uint8')).convert('RGBA')
+                img = Image.new('RGBA', (target_width_xy, target_height_xy))
 
             # Only overlay the mask if show_mask is True
             if self.mask_data is not None and self.show_mask:
@@ -334,15 +385,17 @@ class VesuviusKintsugi:
                 img = Image.alpha_composite(img, barrier_img)
 
             if self.prediction_data is not None and self.show_prediction:
-                pred = np.uint8(self.prediction_data[:, :] * self.overlay_alpha)
-                blue = np.zeros_like(pred, dtype=np.uint8)
-                blue[:, :] = 255  # Red color
-                pred_img = Image.fromarray(np.stack([np.zeros_like(pred), np.zeros_like(pred), blue, pred], axis=-1), 'RGBA')
+                if self.prediction_loaded == False:
+                    pred = np.uint8(self.prediction_data[:, :] * self.overlay_alpha)
+                    blue = np.zeros_like(pred, dtype=np.uint8)
+                    blue[:, :] = 255  # Red color
+                    self.pred_img = Image.fromarray(np.stack([np.zeros_like(pred), np.zeros_like(pred), blue, pred], axis=-1), 'RGBA')
 
                 # Overlay the barrier mask on the original image
-                img = Image.alpha_composite(img, pred_img)
+                img = Image.alpha_composite(img, self.pred_img)
 
                     # Resize the image with aspect ratio
+            '''
             if self.initial_load:
                 img = self.resize_to_fit_canvas(img, target_width_xy, target_height_xy)
                 self.initial_load = False
@@ -353,6 +406,28 @@ class VesuviusKintsugi:
             self.resized_img = img.convert('RGB')
             self.photo_img = ImageTk.PhotoImage(image=self.resized_img)
             self.canvas.create_image(self.image_position_x, self.image_position_y, anchor=tk.NW, image=self.photo_img)
+            self.canvas.tag_raise(self.z_slice_text)
+            self.canvas.tag_raise(self.cursor_pos_text)
+            '''
+
+            # Apply the affine transformation
+            mat_inv = np.linalg.inv(self.mat_affine)
+            affine_inv = (
+                mat_inv[0, 0], mat_inv[0, 1], mat_inv[0, 2],
+                mat_inv[1, 0], mat_inv[1, 1], mat_inv[1, 2]
+            )
+
+            # Transform the image using the affine matrix
+            self.resized_img = img.transform(
+                (target_width_xy, target_height_xy),
+                Image.AFFINE,   
+                affine_inv,   
+                Image.Resampling.NEAREST
+            )
+
+            # Convert back to a format that can be displayed in Tkinter
+            self.photo_img = ImageTk.PhotoImage(image=self.resized_img)
+            self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo_img)
             self.canvas.tag_raise(self.z_slice_text)
             self.canvas.tag_raise(self.cursor_pos_text)
 
@@ -386,33 +461,25 @@ class VesuviusKintsugi:
         if input is None:
             return 0, 0, 0  # Default values
         if isinstance(input, tuple):
-                _, y, x = input
+            _, y, x = input
         elif hasattr(input, 'x') and hasattr(input, 'y'):
-                x, y = input.x, input.y
+            x, y = input.x, input.y
         else:
             # Handle unexpected input types
             raise ValueError("Input must be a tuple or an event object")
+
         if self.voxel_data is not None:
-            original_image_height, original_image_width = self.voxel_data[self.z_index].shape
+            # Apply the inverse of the affine transformation to the clicked coordinates
+            mat_inv = np.linalg.inv(self.mat_affine)
+            transformed_point = np.dot(mat_inv, [x, y, 1])
 
-            # Dimensions of the image at the current zoom level
-            zoomed_width = original_image_width * self.zoom_level
-            zoomed_height = original_image_height * self.zoom_level
+            # Extract the image coordinates from the transformed point
+            img_x = int(transformed_point[0])
+            img_y = int(transformed_point[1])
 
-            # Adjusting click position for panning
-            pan_adjusted_x = x - self.image_position_x
-            pan_adjusted_y = y - self.image_position_y
-
-            # Calculate the position in the zoomed image
-            zoomed_image_x = max(0, min(pan_adjusted_x, zoomed_width))
-            zoomed_image_y = max(0, min(pan_adjusted_y, zoomed_height))
-
-            # Scale back to original image coordinates
-            img_x = int(zoomed_image_x / self.zoom_level)
-            img_y = int(zoomed_image_y / self.zoom_level)
-
-            # Debugging output
-            #print(f"Clicked at: ({x}, {y}), Image Coords: ({img_x}, {img_y})")
+            # Ensure the coordinates are within the bounds of the image
+            img_x = max(0, min(img_x, self.voxel_data.shape[2] - 1))
+            img_y = max(0, min(img_y, self.voxel_data.shape[1] - 1))
 
             return self.z_index, img_y, img_x
     
@@ -421,9 +488,9 @@ class VesuviusKintsugi:
         if self.voxel_data is not None:
             # Calculate the square bounds of the circle
             min_x = max(0, center_x - self.pencil_size)
-            max_x = min(self.voxel_data.shape[2] - 1, center_x + self.pencil_size)
+            max_x = min(self.dimx - 1, center_x + self.pencil_size)
             min_y = max(0, center_y - self.pencil_size)
-            max_y = min(self.voxel_data.shape[1] - 1, center_y + self.pencil_size)
+            max_y = min(self.dimx - 1, center_y + self.pencil_size)
 
         if self.mode.get() in ["pencil", "eraser"]:
             # Decide which mask to edit based on editing_barrier flag
@@ -479,16 +546,37 @@ class VesuviusKintsugi:
         if self.voxel_data is not None:
             # Update the z_index based on scroll direction
             delta = 1 if delta > 0 else -1
-            self.z_index = max(0, min(self.z_index + delta, self.voxel_data.shape[0] - 1))
+            self.z_index = max(0, min(self.z_index + delta, self.dimz - 1))
             self.update_display_slice()
 
-
+    '''
     def zoom(self, delta):
         zoom_amount = 0.1  # Adjust the zoom sensitivity as needed
         if delta > 0:
             self.zoom_level = min(self.max_zoom_level, self.zoom_level + zoom_amount)
         else:
             self.zoom_level = max(1, self.zoom_level - zoom_amount)
+        self.update_display_slice()
+    '''
+
+    def translate(self, offset_x, offset_y):
+        mat = np.eye(3)
+        mat[0, 2] = float(offset_x)
+        mat[1, 2] = float(offset_y)
+        self.mat_affine = np.dot(mat, self.mat_affine)
+
+    def scale(self, scale_factor, cx, cy):
+        self.translate(-cx, -cy)
+        mat = np.eye(3)
+        mat[0, 0] = mat[1, 1] = scale_factor
+        self.mat_affine = np.dot(mat, self.mat_affine)
+        self.translate(cx, cy)
+
+    def zoom(self, delta):
+        zoom_amount = 1.1 if delta > 0 else 0.9
+        canvas_center_x = self.canvas.winfo_width() / 2
+        canvas_center_y = self.canvas.winfo_height() / 2
+        self.scale(zoom_amount, canvas_center_x, canvas_center_y)
         self.update_display_slice()
 
     def toggle_mask(self):
