@@ -1,3 +1,4 @@
+import argparse
 import tkinter as tk
 import glob
 import tifffile
@@ -11,6 +12,7 @@ import math
 import os
 import gc
 import sys
+import h5py
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -48,7 +50,28 @@ class VesuviusKintsugi:
         self.initial_load = True
         self.mat_affine = np.eye(3)
         self.slice_cache = {}
-        self.init_ui()
+        self.format = None
+        self.canvas = None
+        arg_parser = self.init_argparse()
+        arguments = arg_parser.parse_args()
+        self.init_ui(arguments)
+
+    @staticmethod
+    def init_argparse():
+        parser = argparse.ArgumentParser(usage="%(prog)s [OPTION] [FILE]...", description="Visualize and help annotate Vesuvian Challenge data.")
+        # parser.add_argument("--help", action="help")
+        parser.add_argument("--h5fs-file", help="full path to H5FS (.h5) file; the first dataset there will be used")
+        parser.add_argument("--axes", help="axes sequence in H5FS dataset", choices=['xyz', 'yxz', 'xzy', 'zxy', 'yzx', 'zyx'], default="xyz")
+        parser.add_argument("--roi", help="region of interest (in dataset coords and axes!) to be loaded into memory and used, in x0-x1,y0-y1,z0-y1 notation (e.g. '0-1000,0-700,0-50')", default="0-1000,0-700,0-50")
+        return parser
+
+    @staticmethod
+    def parse_h5_roi_argument(roi):
+        axes_rois = roi.split(',')
+        for axis_roi in axes_rois:
+            start, end = axis_roi.split('-')
+            yield int(start)
+            yield int(end)
 
     def prepare_image_slice(self, z_index):
         """Prepare the image slice for display."""
@@ -68,39 +91,69 @@ class VesuviusKintsugi:
             else:
                 img_data = self.voxel_data[z_index][:, :].astype('uint8')
 
+        elif self.format == 'h5fs':
+            img_data = self.voxel_data[z_index, :, :]
+
         img = Image.fromarray(img_data).convert('RGBA')
         self.slice_cache[z_index] = img
         return img
 
-    def load_data(self):
-        dir_path = filedialog.askdirectory(title="Select Directory")
-
-        if not dir_path:
-            return
-
-        try:
-            # Check if the directory contains Zarr or TIFF files
-            if os.path.exists(os.path.join(dir_path, '.zarray')):
-                # Load the Zarr data into the voxel_data attribute
-                self.slice_cache = {}
-                gc.collect()
-                self.voxel_data = zarr.open(dir_path, mode='r')
-                self.format = 'zarr'
-            elif glob.glob(os.path.join(dir_path, '*.tif')):
-                # Load TIFF slices into a 3D numpy array using memory-mapped files
-                self.slice_cache = {}
-                gc.collect()
-                tiff_files = sorted(glob.glob(os.path.join(dir_path, '*.tif')), key=lambda x: int(os.path.basename(x).split('.')[0]))
-                self.voxel_data = [tifffile.memmap(f) for f in tiff_files]
-                self.format = 'tiff'
-                #self.voxel_data = np.stack(slices, axis=0)
-                self.update_log(f"Data loaded successfully.")
-            else:
-                self.update_log("Directory does not contain recognizable Zarr or TIFF files.")
+    def load_data(self, h5_filename=None, h5_axes_seq=None, h5_roi=None):
+        if not h5_filename:
+            selected_path = filedialog.askdirectory(title="Select Directory")
+            if not selected_path:
                 return
 
-            self.dimz = len(self.voxel_data)
-            self.dimy, self.dimx = self.voxel_data[0].shape
+        try:
+            if h5_filename:
+                self.h5_data_file = h5py.File(h5_filename, 'r')
+                dataset_name, dataset_shape, dataset_type, dataset_chunks = self._h5_get_first_dataset_info(self.h5_data_file['/'])
+                print("Opening dataset:", dataset_name, dataset_shape, dataset_type, dataset_chunks)
+                if dataset_type != np.uint16:
+                    raise Exception(f"Don't know how to display this dataset dtype ({dataset_type}), sorry")
+                self.dataset = self.h5_data_file.require_dataset(dataset_name, shape=dataset_shape, dtype=dataset_type, chunks=dataset_chunks)
+                self.format = 'h5fs'
+                x0, x1, y0, y1, z0, z1 = list(self.parse_h5_roi_argument(h5_roi))
+                self.voxel_data = (self.dataset[x0:x1, y0:y1, z0:z1] / 256).astype(np.uint8)
+
+                # we want to get zyx, so we perform swapaxes() until that happens: (kind of a bubblesort of axes)
+                h5_axes_seq = [*h5_axes_seq]  # convert to list of characters
+                if h5_axes_seq[0] != 'z':
+                    swap_with = h5_axes_seq.index('z')
+                    self.voxel_data = self.voxel_data.swapaxes(0, swap_with)
+                    h5_axes_seq[swap_with] = h5_axes_seq[0]
+                    h5_axes_seq[0] = 'z'
+                if h5_axes_seq[1] != 'y':
+                    swap_with = h5_axes_seq.index('y')
+                    self.voxel_data = self.voxel_data.swapaxes(1, swap_with)
+                    h5_axes_seq[swap_with] = h5_axes_seq[1]
+                    h5_axes_seq[1] = 'y'
+
+                self.dimz, self.dimy, self.dimx = self.voxel_data.shape
+                self.file_name = os.path.basename(h5_filename)
+            else:
+                # Check if the directory contains Zarr or TIFF files
+                if os.path.exists(os.path.join(selected_path, '.zarray')):
+                    # Load the Zarr data into the voxel_data attribute
+                    self.voxel_data = zarr.open(selected_path, mode='r')
+                    self.format = 'zarr'
+                elif glob.glob(os.path.join(selected_path, '*.tif')):
+                    # Load TIFF slices into a 3D numpy array using memory-mapped files
+                    tiff_files = sorted(glob.glob(os.path.join(selected_path, '*.tif')), key=lambda x: int(os.path.basename(x).split('.')[0]))
+                    self.voxel_data = [tifffile.memmap(f) for f in tiff_files]
+                    self.format = 'tiff'
+                    #self.voxel_data = np.stack(slices, axis=0)
+                else:
+                    self.update_log("Directory does not contain recognizable Zarr or TIFF files.")
+                    print(selected_path)
+                    return
+                self.dimz = len(self.voxel_data)
+                self.dimy, self.dimx = self.voxel_data[0].shape
+                self.file_name = os.path.basename(selected_path)
+
+            self.update_log(f"Data loaded successfully.")
+            self.slice_cache = {}
+            gc.collect()
             self.mask_data = np.zeros((self.dimz,self.dimy,self.dimx), dtype=np.uint8)
             self.barrier_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
             self.z_index = 0
@@ -108,7 +161,6 @@ class VesuviusKintsugi:
                 self.threshold = [10 for _ in range(self.dimz)]
             self.initial_load = True
             self.update_display_slice()
-            self.file_name = os.path.basename(dir_path)
             self.root.title(f"Vesuvius Kintsugi - {self.file_name}")
             self.bucket_layer_slider.configure(from_=0, to=self.dimz - 1)
             self.bucket_layer_slider.set(0)
@@ -352,7 +404,7 @@ class VesuviusKintsugi:
         return image.resize((new_width, new_height), Image.Resampling.NEAREST)
     
     def update_display_slice(self):
-        if self.voxel_data is not None:
+        if self.voxel_data is not None and self.canvas is not None:
             target_width_xy = self.canvas.winfo_width()
             target_height_xy = self.canvas.winfo_height()
                       
@@ -716,7 +768,20 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         widget.bind("<Enter>", enter)
         widget.bind("<Leave>", leave)
 
-    def init_ui(self):
+    def on_exit(self):
+        if self.format == 'h5fs':
+            print("Closing H5 file.")
+            self.h5_data_file.close()
+
+    # butchered from: https://stackoverflow.com/a/53340677
+    def _h5_get_first_dataset_info(self, obj):
+        if type(obj) in [h5py._hl.group.Group,h5py._hl.files.File]:
+            for key in obj.keys():
+                return self._h5_get_first_dataset_info(obj[key])
+        elif type(obj)==h5py._hl.dataset.Dataset:
+            return obj.name, obj.shape, obj.dtype, obj.chunks
+
+    def init_ui(self, arguments):
         self.root = tk.Tk()
         #self.root.iconbitmap("./icons/favicon.ico")
         self.root.title("Vesuvius Kintsugi")
@@ -941,7 +1006,11 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text['yscrollcommand'] = log_scrollbar.set
 
+        if arguments.h5fs_file:
+            self.load_data(h5_filename=arguments.h5fs_file, h5_axes_seq=arguments.axes, h5_roi=arguments.roi)
+
         self.root.mainloop()
+        self.on_exit()
 
 if __name__ == "__main__":
     editor = VesuviusKintsugi()
