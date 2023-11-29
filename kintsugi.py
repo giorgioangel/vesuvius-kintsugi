@@ -180,10 +180,10 @@ class VesuviusKintsugi:
             try:
                 # Load the prediction PNG file
                 loaded_prediction = Image.open(pred_file_path)
-                
+
                 # Convert the image to a NumPy array
                 prediction_data_np = np.array(loaded_prediction)
-                
+
                 # Calculate padding and remove it
                 '''
                 pad0 = (64 - self.voxel_data.shape[1] % 64) # 64 tile size
@@ -215,7 +215,7 @@ class VesuviusKintsugi:
         # File dialog to select mask file
         mask_file_path = filedialog.askdirectory(
             title="Select Label Zarr File")
-            
+
 
         if mask_file_path:
             try:
@@ -262,7 +262,7 @@ class VesuviusKintsugi:
             current_threshold = self.threshold[self.th_layer]
             self.bucket_threshold_var.set(f"{current_threshold}")
             # You may need to adjust this line depending on how the slider is named in your code
-            self.bucket_threshold_slider.set(current_threshold)  
+            self.bucket_threshold_slider.set(current_threshold)
 
             self.update_log(f"Layer {self.th_layer} selected, current threshold is {current_threshold}.")
         except ValueError:
@@ -342,7 +342,7 @@ class VesuviusKintsugi:
 
     def undo_last_action(self):
         if self.history:
-            self.mask_data = self.history.pop() 
+            self.mask_data = self.history.pop()
             self.update_display_slice()
             self.update_log("Last action undone.")
         else:
@@ -378,7 +378,7 @@ class VesuviusKintsugi:
         self.drag_start_x = None
         self.drag_start_y = None
         self.update_display_slice()
-        
+
     def resize_with_aspect(self, image, target_width, target_height, zoom=1):
         original_width, original_height = image.size
         zoomed_width, zoomed_height = int(original_width * zoom), int(original_height * zoom)
@@ -402,18 +402,18 @@ class VesuviusKintsugi:
         self.zoom_level = min(new_width / original_width, new_height / original_height)
 
         return image.resize((new_width, new_height), Image.Resampling.NEAREST)
-    
+
     def update_display_slice(self):
         if self.voxel_data is not None and self.canvas is not None:
             target_width_xy = self.canvas.winfo_width()
             target_height_xy = self.canvas.winfo_height()
-                      
+
             # Convert the current slice to an RGBA image
             if self.show_image:
                 if self.z_index in self.slice_cache:
                     img = self.slice_cache[self.z_index]
                 else:
-                    img = self.prepare_image_slice(self.z_index)           
+                    img = self.prepare_image_slice(self.z_index)
             else:
                 img = Image.new('RGBA', (target_width_xy, target_height_xy))
 
@@ -472,8 +472,8 @@ class VesuviusKintsugi:
             # Transform the image using the affine matrix
             self.resized_img = img.transform(
                 (target_width_xy, target_height_xy),
-                Image.AFFINE,   
-                affine_inv,   
+                Image.AFFINE,
+                affine_inv,
                 Image.Resampling.NEAREST
             )
 
@@ -534,7 +534,7 @@ class VesuviusKintsugi:
             img_y = max(0, min(img_y, self.voxel_data.shape[1] - 1))
 
             return self.z_index, img_y, img_x
-    
+
     def color_pixel(self, img_coords):
         z_index, center_y, center_x = img_coords
         if self.voxel_data is not None:
@@ -555,7 +555,7 @@ class VesuviusKintsugi:
                             target_mask[z_index, y, x] = mask_value
             self.update_display_slice()
 
-    
+
     def update_pencil_size(self, val):
         self.pencil_size = int(float(val))
         self.pencil_size_var.set(f"{self.pencil_size}")
@@ -576,7 +576,7 @@ class VesuviusKintsugi:
             self.pencil_cursor = self.canvas.create_oval(event.x - radius, event.y - radius, event.x + radius, event.y + radius, outline=color, width=2)
         self.click_coordinates = (self.z_index, event.y, event.x)
         self.update_info_display()
-            
+
     def scroll_or_zoom(self, event):
         # Adjust for different platforms
         ctrl_pressed = False
@@ -800,10 +800,10 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         drawing_tools_frame.pack(side=tk.LEFT, padx=5)
 
         # Load and set icons for buttons (icons need to be added)
-        load_icon = PhotoImage(file='./icons/open-64.png') 
+        load_icon = PhotoImage(file='./icons/open-64.png')
         save_icon = PhotoImage(file='./icons/save-64.png')
         prediction_icon = PhotoImage(file='./icons/prediction-64.png')
-        undo_icon = PhotoImage(file='./icons/undo-64.png') 
+        undo_icon = PhotoImage(file='./icons/undo-64.png')
         brush_icon = PhotoImage(file='./icons/brush-64.png')
         eraser_icon = PhotoImage(file='./icons/eraser-64.png')
         bucket_icon = PhotoImage(file='./icons/bucket-64.png')
