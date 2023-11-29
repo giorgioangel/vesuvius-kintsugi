@@ -1,0 +1,7 @@
+numpy
+zarr
+pillow
+tk
+ttkthemes
+tifffile
+h5py
