@@ -286,7 +286,7 @@ class VesuviusKintsugi:
 
     def flood_fill_3d(self, start_coord):
         self.flood_fill_active = True
-        if self.format == 'zarr':
+        if self.format in ['zarr', 'h5fs']:
             target_color = int(self.voxel_data[start_coord])
         elif self.format == 'tiff':
             z, y, x = start_coord
@@ -305,8 +305,8 @@ class VesuviusKintsugi:
 
             if self.barrier_mask[cz, cy, cx] != 0:
                 continue
-            
-            if self.format == 'zarr':
+
+            if self.format in ['zarr', 'h5fs']:
                 voxel_value = int(self.voxel_data[cz, cy, cx])
                 print(voxel_value)
 
