@@ -10,7 +10,7 @@ POUR GOLD INTO THE CRACKLES!
 ## Features
 ![my screenshot](screenshot.jpg)
 ### Interactive UI
-- A graphical user interface that enables users to navigate through 3D Zarr data.
+- A graphical user interface that enables users to navigate through 3D Zarr data, H5FS 3D images and a folder with multiple TIFFs (experimental).
 - Tools for labeling including brush, eraser, and flood fill (3D bucket).
 - Toggle visibility of labels, barrier masks, and original images.
 - Adjust the transparency of label and barrier overlays.
@@ -24,6 +24,7 @@ POUR GOLD INTO THE CRACKLES!
 
 ### Efficient Data Handling
 - Loading and saving of Zarr formatted data directly from and to disk.
+- Efficient support of H5FS 3D images.
 
 ### Accessibility and Assistance
 - Tooltips provide guidance for each control.
@@ -35,24 +36,47 @@ POUR GOLD INTO THE CRACKLES!
 
 ## Installation
 
-Before using Vesuvius Kintsugi, ensure that the following dependencies are installed:
+Before using Vesuvius Kintsugi, ensure that the necessary dependencies are installed.
 
+- You can either create a virtual environment with
 ```console
-pip install numpy zarr Pillow tk ttkthemes
+$ pip install pipenv
+```
+and then, install the dependencies
+```console
+$ pipenv install
+```
+
+- alternatively, you can install directly the dependencies with:
+```console
+$ pip install -r requirements.txt
 ```
 
 ## Usage
 Run the main Python script to launch the Vesuvius Kintsugi interface:
 ```console
-python kintsugi.py
+$ pipenv shell # if you are using a virtual environment
+$ python kintsugi.py
 ```
-Use the provided buttons to load Zarr data, navigate through slices, label regions, and save your work. The interface supports various annotation strategies suitable for different types of 3D structures.
+Use the provided buttons to load Zarr data or folders containing TIFF (experimental), navigate through slices, label regions, and save your work. The interface supports various annotation strategies suitable for different types of 3D structures.
+
+You can also load H5FS files running the script with the following command line arguments:
+```console
+$ python kintsugi.py --h5fs-file=/path/to/file.h5 --axes=zxy --roi=3070-3900,2770-3100,1500-2000
+```
+
+Region of interest (`--roi`) is specified in original dataset coordinates (and the axes sequence matches dataset too), one must take care not to specify too big a volume, because it all goes into memory.
+
+With `--axes`, one can specify what kind of axes sequence the original dataset has. This will be mapped so that `z` will be zoomable (depth), `x` will be horizontal and `y` will be vertical.
 
 ## Customization
 Directly customize the pencil size, flood fill threshold, and maximum propagation steps from the UI to tailor the tool's behavior to your specific data and labeling needs.
 
 ## Contributing
 We encourage contributions to enhance the functionality of Vesuvius Kintsugi.
+
+- [kglspl](https://github.com/kglspl): Special thanks to kglspl for his outstanding contributions!
+
 
 ## Author
 Dr. Giorgio Angelotti
