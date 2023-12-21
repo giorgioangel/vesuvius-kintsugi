@@ -87,7 +87,7 @@ class VesuviusKintsugi:
         except queue.Empty:
             pass
         finally:
-            self.root.after(100, self.process_queue)
+            self.root.after(50, self.process_queue)
 
     def prepare_image_slice(self, z_index):
         """Prepare the image slice for display."""
@@ -341,7 +341,6 @@ class VesuviusKintsugi:
                 self.update_queue.put(lambda: self.update_display_slice())
         if self.flood_fill_active == True:
             self.flood_fill_active = False
-            self.update_log("Flood fill ended.")
             self.update_queue.put(lambda: self.update_display_slice())
 
     def stop_flood_fill(self):
@@ -349,27 +348,33 @@ class VesuviusKintsugi:
         self.update_log("Flood fill stopped.")
 
     def threaded_start_anchor_flood_fill(self):
-        executor = ThreadPoolExecutor(max_workers=3)
-        executor.submit(self.start_anchor_flood_fill)
+        if np.where(self.anchor_mask == 1) is not None:
+            # Run anchor_flood_fill in a separate thread
+            thread = threading.Thread(target=self.start_anchor_flood_fill)
+            thread.start()
+        else:
+            self.update_log("No anchor points selected or data for flood fill.")
 
     def start_anchor_flood_fill(self):
         if self.anchor_mask is None:
             self.anchor_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
         anchor_points = np.where(self.anchor_mask == 1)
         anchor_points = np.stack(anchor_points, axis=1)
-        self.update_log(f"Starting anchor flood fill...")
+        self.update_queue.put(lambda: self.update_log(f"Starting anchor flood fill..."))
         print(f"Starting anchor flood fill...")
         anchor_queue = deque(anchor_points)
         total_anchor_count = len(anchor_points)
-        executor = ThreadPoolExecutor(max_workers=3)
+        executor = ThreadPoolExecutor(max_workers=5)
         for i, anchor_point in enumerate(anchor_queue):    
             # Run flood_fill_3d in a separate thread
             executor.submit(self.flood_fill_3d, anchor_point)
             if i % 5 == 0:  # Update GUI every 5 tasks
-                self.update_log(f"{i+1} / {total_anchor_count} anchor points processed")
-                print(f"{i+1} / {total_anchor_count} anchor points processed")
+                self.update_queue.put(lambda: self.update_log(f"{i} / {total_anchor_count} anchor points processed"))
+                print(f"{i} / {total_anchor_count} anchor points processed")
+                executor.shutdown(wait=True)
+                executor = ThreadPoolExecutor(max_workers=5)
         executor.shutdown(wait=True)
-        self.update_log(f"Anchor flood fill ended.")
+        self.update_queue.put(lambda: self.update_log(f"Anchor flood fill ended."))
         print(f"Anchor flood fill ended.")
         # Reset anchor mask
         self.anchor_mask = np.zeros_like(self.anchor_mask, dtype=np.uint8)
