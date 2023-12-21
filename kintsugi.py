@@ -13,6 +13,8 @@ import os
 import gc
 import sys
 import h5py
+from concurrent.futures import ThreadPoolExecutor
+import queue
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -20,9 +22,10 @@ class VesuviusKintsugi:
     def __init__(self):
         self.overlay_alpha = 255
         self.barrier_mask = None  # New mask to act as a barrier for flood fill
+        self.anchor_mask = None  # New mask to show anchor points for flood fill
         self.editing_barrier = False  # False for editing label, True for editing barrier
+        self.editing_anchor = False  # False for editing label, True for editing anchor
         self.max_propagation_steps = 100  # Default maximum propagation steps
-        self.show_barrier = True
         self.voxel_data = None
         self.prediction_data = None
         self.photo_img = None
@@ -45,8 +48,11 @@ class VesuviusKintsugi:
         self.max_history_size = 3  # Maximum number of states to store
         self.mask_data = None
         self.show_mask = True  # Default to showing the mask
+        self.show_anchor = True  # Default to showing anchor points
         self.show_image = True
         self.show_prediction = True
+        self.show_barrier = True
+        self.update_queue = queue.Queue()
         self.initial_load = True
         self.mat_affine = np.eye(3)
         self.slice_cache = {}
@@ -72,6 +78,16 @@ class VesuviusKintsugi:
             start, end = axis_roi.split('-')
             yield int(start)
             yield int(end)
+    
+    def process_queue(self):
+        try:
+            while True:
+                update_func = self.update_queue.get_nowait()
+                update_func()
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(50, self.process_queue)
 
     def prepare_image_slice(self, z_index):
         """Prepare the image slice for display."""
@@ -156,6 +172,7 @@ class VesuviusKintsugi:
             gc.collect()
             self.mask_data = np.zeros((self.dimz,self.dimy,self.dimx), dtype=np.uint8)
             self.barrier_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
+            self.anchor_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
             self.z_index = 0
             if self.voxel_data is not None:
                 self.threshold = [10 for _ in range(self.dimz)]
@@ -215,7 +232,6 @@ class VesuviusKintsugi:
         # File dialog to select mask file
         mask_file_path = filedialog.askdirectory(
             title="Select Label Zarr File")
-
 
         if mask_file_path:
             try:
@@ -308,7 +324,6 @@ class VesuviusKintsugi:
 
             if self.format in ['zarr', 'h5fs']:
                 voxel_value = int(self.voxel_data[cz, cy, cx])
-                print(voxel_value)
 
             elif self.format == 'tiff':
                 voxel_value = int(self.voxel_data[cz][cy, cx])
@@ -322,16 +337,47 @@ class VesuviusKintsugi:
                                 continue
                             queue.append((cz + dz, cy + dy, cx + dx))
 
-            if counter % 10 == 0:
-                self.root.after(1, self.update_display_slice)
+            if counter % 10 == 0: # Increase this to avoid overwhelming the UI
+                self.update_queue.put(lambda: self.update_display_slice())
         if self.flood_fill_active == True:
             self.flood_fill_active = False
-            self.update_log("Flood fill ended.")
-            self.update_display_slice()
+            self.update_queue.put(lambda: self.update_display_slice())
 
     def stop_flood_fill(self):
         self.flood_fill_active = False
         self.update_log("Flood fill stopped.")
+
+    def threaded_start_anchor_flood_fill(self):
+        if np.where(self.anchor_mask == 1) is not None:
+            # Run anchor_flood_fill in a separate thread
+            thread = threading.Thread(target=self.start_anchor_flood_fill)
+            thread.start()
+        else:
+            self.update_log("No anchor points selected or data for flood fill.")
+
+    def start_anchor_flood_fill(self):
+        if self.anchor_mask is None:
+            self.anchor_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
+        anchor_points = np.where(self.anchor_mask == 1)
+        anchor_points = np.stack(anchor_points, axis=1)
+        self.update_queue.put(lambda: self.update_log(f"Starting anchor flood fill..."))
+        print(f"Starting anchor flood fill...")
+        anchor_queue = deque(anchor_points)
+        total_anchor_count = len(anchor_points)
+        executor = ThreadPoolExecutor(max_workers=5)
+        for i, anchor_point in enumerate(anchor_queue):    
+            # Run flood_fill_3d in a separate thread
+            executor.submit(self.flood_fill_3d, anchor_point)
+            if i % 5 == 0:  # Update GUI every 5 tasks
+                self.update_queue.put(lambda: self.update_log(f"{i} / {total_anchor_count} anchor points processed"))
+                print(f"{i} / {total_anchor_count} anchor points processed")
+                executor.shutdown(wait=True)
+                executor = ThreadPoolExecutor(max_workers=5)
+        executor.shutdown(wait=True)
+        self.update_queue.put(lambda: self.update_log(f"Anchor flood fill ended."))
+        print(f"Anchor flood fill ended.")
+        # Reset anchor mask
+        self.anchor_mask = np.zeros_like(self.anchor_mask, dtype=np.uint8)
 
     def save_state(self):
         # Save the current state of the image before modifying it
@@ -426,6 +472,15 @@ class VesuviusKintsugi:
 
                 # Overlay the mask on the original image
                 img = Image.alpha_composite(img, mask_img)
+            
+            if self.anchor_mask is not None and self.show_anchor:
+                anchor = np.uint8(self.anchor_mask[self.z_index, :, :] * self.overlay_alpha)
+                green = np.zeros_like(anchor, dtype=np.uint8)
+                green[:, :] = 128  # Green color
+                anchor_img = Image.fromarray(np.stack([np.zeros_like(anchor), green, np.zeros_like(anchor), anchor], axis=-1), 'RGBA')
+
+                # Overlay the barrier mask on the original image
+                img = Image.alpha_composite(img, anchor_img)
 
             if self.barrier_mask is not None and self.show_barrier:
                 barrier = np.uint8(self.barrier_mask[self.z_index, :, :] * self.overlay_alpha)
@@ -505,6 +560,8 @@ class VesuviusKintsugi:
                 self.click_coordinates = img_coords
                 self.update_log("Starting flood fill...")
                 self.threaded_flood_fill()  # Assuming threaded_flood_fill is implemented for non-blocking UI
+        elif self.mode.get() == "anchor":
+            self.color_pixel(img_coords)
         elif self.mode.get() == "pencil":
             # Assuming the pencil (pixel editing) functionality
             self.color_pixel(img_coords)  # Assuming color_pixel is implemented
@@ -529,9 +586,13 @@ class VesuviusKintsugi:
             img_x = int(transformed_point[0])
             img_y = int(transformed_point[1])
 
-            # Ensure the coordinates are within the bounds of the image
-            img_x = max(0, min(img_x, self.voxel_data.shape[2] - 1))
-            img_y = max(0, min(img_y, self.voxel_data.shape[1] - 1))
+            if self.format == "tiff":
+                # Ensure the coordinates are within the bounds of the image
+                img_x = max(0, min(img_x, self.voxel_data[self.z_index].shape[1] - 1))
+                img_y = max(0, min(img_y, self.voxel_data[self.z_index].shape[0] - 1))
+            else:
+                img_x = max(0, min(img_x, self.voxel_data.shape[2] - 1))
+                img_y = max(0, min(img_y, self.voxel_data.shape[1] - 1))
 
             return self.z_index, img_y, img_x
 
@@ -546,13 +607,22 @@ class VesuviusKintsugi:
 
         if self.mode.get() in ["pencil", "eraser"]:
             # Decide which mask to edit based on editing_barrier flag
-            target_mask = self.barrier_mask if self.editing_barrier else self.mask_data
+            if self.editing_barrier:
+                target_mask = self.barrier_mask
+            elif self.editing_anchor and self.mode.get() == "eraser":
+                target_mask = self.anchor_mask
+            else:
+                target_mask = self.mask_data
             mask_value = 1 if self.mode.get() == "pencil" else 0
             for y in range(min_y, max_y + 1):
                 for x in range(min_x, max_x + 1):
                     # Check if the pixel is within the circle's radius
                     if math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2) <= self.pencil_size:
                             target_mask[z_index, y, x] = mask_value
+            self.update_display_slice()
+        elif self.mode.get() == "anchor":
+            target_mask = self.anchor_mask
+            target_mask[z_index, center_y, center_x] = 1
             self.update_display_slice()
 
 
@@ -649,6 +719,15 @@ class VesuviusKintsugi:
         self.update_display_slice()
         self.update_log(f"Barrier {'shown' if self.show_barrier else 'hidden'}.\n")
 
+    def toggle_anchor(self):
+        # Toggle the state
+        self.show_anchor = not self.show_anchor
+        # Update the variable for the Checkbutton
+        self.show_anchor_var.set(self.show_anchor)
+        # Update the display to reflect the new state
+        self.update_display_slice()
+        self.update_log(f"Anchor Points {'shown' if self.show_anchor else 'hidden'}.\n")
+
     def toggle_image(self):
         # Toggle the state
         self.show_image = not self.show_image
@@ -667,10 +746,15 @@ class VesuviusKintsugi:
         self.update_display_slice()
         self.update_log(f"Ink predicton {'shown' if self.show_prediction else 'hidden'}.\n")
 
-    def toggle_editing_mode(self):
+    def toggle_editing_barrier_mode(self):
         # Toggle between editing label and barrier
         self.editing_barrier = not self.editing_barrier
         self.update_log(f"Editing {'Barrier' if self.editing_barrier else 'Label'}")
+    
+    def toggle_editing_anchor_mode(self):
+        # Toggle between editing label and barrier
+        self.editing_anchor = not self.editing_anchor
+        self.update_log(f"Editing {'Barrier' if self.editing_anchor else 'Label'}")
 
     def update_alpha(self, val):
         self.overlay_alpha = int(float(val))
@@ -703,19 +787,24 @@ Commands Overview:
   5. Brush Tool: Edit labels or barriers with a freehand brush.
   6. Eraser Tool: Erase parts of the label or barrier.
   7. Edit Barrier: Toggle between editing the label or the barrier mask.
-  8. Pencil Size: Adjust the size of the brush and eraser tools.
-  9. 3D Flood Fill Tool: Fill an area with the label based on similarity.
-  10. STOP: Interrupt the ongoing flood fill operation.
-  11. Info: Display information and usage tips.
+  8. Edit Anchor: Toggle between editing the label or the anchor mask (for erasing anchor points).
+  9. Pencil Size: Adjust the size of the brush and eraser tools.
+  10. 3D Flood Fill Tool: Fill an area with the label based on similarity.
+  11. Anchor Flood Fill Tool: Select multiple starting points for the 3D flood fill tool.
+  12. Start Anchor Flood Fill: Start the 3D flood fill operation on all anchor poins as the seed points for 3D flood fill.
+  13. STOP: Interrupt the ongoing flood fill operation.
+  14. Info: Display information and usage tips.
 
 - Sliders and Toggles (Bottom):
   1. Toggle Label: Show or hide the label overlay.
-  2. Toggle Barrier: Show or hide the barrier overlay.
-  3. Opacity: Adjust the transparency of the label and barrier overlays.
-  4. Toggle Image: Show or hide the image data.
-  5. Bucket Layer: Select the layer to adjust its specific flood fill threshold.
-  6. Bucket Threshold: Set the threshold for the flood fill tool.
-  7. Max Propagation: Limit the extent of the flood fill operation.
+  2. Toggle Anchors: Show or hide the Anchor overlay.
+  3. Toggle Barrier: Show or hide the barrier overlay.
+  4. Toggle Prediction: Show or hide the Prediction overlay.
+  5. Opacity: Adjust the transparency of the label and barrier overlays.
+  6. Toggle Image: Show or hide the image data.
+  7. Bucket Layer: Select the layer to adjust its specific flood fill threshold.
+  8. Bucket Threshold: Set the threshold for the flood fill tool.
+  9. Max Propagation: Limit the extent of the flood fill operation.
 
 Usage Tips:
 - Pouring Gold: The 3D flood fill algorithm labels contiguous areas based on voxel intensity and the set threshold.
@@ -725,6 +814,8 @@ Usage Tips:
 - Editing Modes: Use the "Edit Barrier" toggle to switch between modifying the label and the barrier mask.
 - Overlay Visibility: Use the toggle buttons to show or hide the label, barrier, and image data for easier editing.
 - Tool Size: Use the "Pencil Size" slider to adjust the size of the brush and eraser.
+- Anchor mode: Use the "Edit Anchor" toggle and the eraser to erase misplaced anchor points prior to running anchor flood fill. 
+- Start Anchor flood fill: The UI hanging when selecting more than 3-5 anchor points is normal, but the program is still running. Check the terminal for progress updates.
 
 Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D voxel image labeling. Released under the MIT license.
 """
@@ -807,6 +898,8 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         brush_icon = PhotoImage(file='./icons/brush-64.png')
         eraser_icon = PhotoImage(file='./icons/eraser-64.png')
         bucket_icon = PhotoImage(file='./icons/bucket-64.png')
+        anchor_icon = PhotoImage(file='./icons/anchor-64.png')
+        start_anchor_icon = PhotoImage(file='./icons/start-anchor-fill-64.png')
         stop_icon = PhotoImage(file='./icons/stop-60.png')
         help_icon = PhotoImage(file='./icons/help-48.png')
         load_mask_icon = PhotoImage(file='./icons/ink-64.png')
@@ -852,7 +945,11 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         self.create_tooltip(eraser_button, "Eraser Tool")
 
         self.editing_barrier_var = tk.BooleanVar(value=self.editing_barrier)
-        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Barrier", command=self.toggle_editing_mode, variable=self.editing_barrier_var)
+        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Barrier", command=self.toggle_editing_barrier_mode, variable=self.editing_barrier_var)
+        toggle_editing_button.pack(side=tk.LEFT, padx=5)
+
+        self.editing_anchor_var = tk.BooleanVar(value=self.editing_anchor)
+        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Anchors", command=self.toggle_editing_anchor_mode, variable=self.editing_anchor_var)
         toggle_editing_button.pack(side=tk.LEFT, padx=5)
 
         self.pencil_size_var = tk.StringVar(value="0")  # Default pencil size
@@ -871,6 +968,16 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         bucket_button.image = bucket_icon
         bucket_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(bucket_button, "Flood Fill Tool")
+
+        anchor_button = ttk.Radiobutton(self.toolbar_frame, image=anchor_icon, variable=self.mode, value="anchor")
+        anchor_button.image = anchor_icon
+        anchor_button.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(anchor_button, "Create Anchor Points")
+
+        start_anchor_fill_button = ttk.Button(self.toolbar_frame, image=start_anchor_icon, command=self.threaded_start_anchor_flood_fill)
+        start_anchor_fill_button.image = start_anchor_icon
+        start_anchor_fill_button.pack(side=tk.LEFT, padx=2)
+        self.create_tooltip(start_anchor_fill_button, "Start Anchor Flood Fill")
 
         # Stop tool button
         stop_button = ttk.Button(self.toolbar_frame, image=stop_icon, command=self.stop_flood_fill)
@@ -922,6 +1029,7 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
 
         # Variables for toggling states
         self.show_mask_var = tk.BooleanVar(value=self.show_mask)
+        self.show_anchor_var = tk.BooleanVar(value=self.show_anchor)
         self.show_barrier_var = tk.BooleanVar(value=self.show_barrier)
         self.show_image_var = tk.BooleanVar(value=self.show_image)
         self.show_prediction_var = tk.BooleanVar(value=self.show_prediction)
@@ -934,7 +1042,10 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         toggle_mask_button = ttk.Checkbutton(toggle_frame, text="Label", command=self.toggle_mask, variable=self.show_mask_var)
         toggle_mask_button.pack(side=tk.LEFT, padx=5, anchor='s')
 
-        toggle_barrier_button = ttk.Checkbutton(toggle_frame, text="Barrier", command=self.toggle_barrier, variable=self.show_barrier_var)
+        toggle_mask_button = ttk.Checkbutton(toggle_frame, text="Anchors", command=self.toggle_mask, variable=self.show_anchor_var)
+        toggle_mask_button.pack(side=tk.LEFT, padx=5, anchor='s')
+
+        toggle_barrier_button = ttk.Checkbutton(toggle_frame, text="Barriers", command=self.toggle_barrier, variable=self.show_barrier_var)
         toggle_barrier_button.pack(side=tk.LEFT, padx=5, anchor='s')
 
         toggle_prediction_button = ttk.Checkbutton(toggle_frame, text="Prediction", command=self.toggle_prediction, variable=self.show_prediction_var)
@@ -1009,6 +1120,7 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         if arguments.h5fs_file:
             self.load_data(h5_filename=arguments.h5fs_file, h5_axes_seq=arguments.axes, h5_roi=arguments.roi)
 
+        self.process_queue()
         self.root.mainloop()
         self.on_exit()
 
