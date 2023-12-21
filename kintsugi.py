@@ -23,7 +23,6 @@ class VesuviusKintsugi:
         self.overlay_alpha = 255
         self.barrier_mask = None  # New mask to act as a barrier for flood fill
         self.anchor_mask = None  # New mask to show anchor points for flood fill
-        self.old_anchor_mask = None  # Old anchor mask to compare to new mask for anchor flood fill
         self.editing_barrier = False  # False for editing label, True for editing barrier
         self.editing_anchor = False  # False for editing label, True for editing anchor
         self.max_propagation_steps = 100  # Default maximum propagation steps
@@ -80,6 +79,16 @@ class VesuviusKintsugi:
             start, end = axis_roi.split('-')
             yield int(start)
             yield int(end)
+    
+    def process_queue(self):
+        try:
+            while True:
+                update_func = self.update_queue.get_nowait()
+                update_func()
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self.process_queue)
 
     def prepare_image_slice(self, z_index):
         """Prepare the image slice for display."""
@@ -225,7 +234,6 @@ class VesuviusKintsugi:
         mask_file_path = filedialog.askdirectory(
             title="Select Label Zarr File")
 
-
         if mask_file_path:
             try:
                 loaded_mask = zarr.open(mask_file_path, mode='r')
@@ -330,24 +338,12 @@ class VesuviusKintsugi:
                                 continue
                             queue.append((cz + dz, cy + dy, cx + dx))
 
-            if counter % 100 == 0: # Increase this to avoid overwhelming the UI
+            if counter % 10 == 0: # Increase this to avoid overwhelming the UI
                 self.update_queue.put(lambda: self.update_display_slice())
-                # self.root.after(1, self.update_display_slice)
         if self.flood_fill_active == True:
             self.flood_fill_active = False
             self.update_log("Flood fill ended.")
             self.update_queue.put(lambda: self.update_display_slice())
-            # self.update_display_slice()
-    
-    def process_queue(self):
-        try:
-            while True:
-                update_func = self.update_queue.get_nowait()
-                update_func()
-        except queue.Empty:
-            pass
-        finally:
-            self.root.after(100, self.process_queue)
 
     def stop_flood_fill(self):
         self.flood_fill_active = False
@@ -358,12 +354,9 @@ class VesuviusKintsugi:
         executor.submit(self.start_anchor_flood_fill)
 
     def start_anchor_flood_fill(self):
-        if self.old_anchor_mask is None:
-            self.old_anchor_mask = np.zeros_like(self.anchor_mask, dtype=np.uint8)
         if self.anchor_mask is None:
             self.anchor_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
-        anchor_points = self.anchor_mask - self.old_anchor_mask
-        anchor_points = np.where(anchor_points == 1)
+        anchor_points = np.where(self.anchor_mask == 1)
         anchor_points = np.stack(anchor_points, axis=1)
         self.update_log(f"Starting anchor flood fill...")
         print(f"Starting anchor flood fill...")
