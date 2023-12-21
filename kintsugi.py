@@ -62,7 +62,6 @@ class VesuviusKintsugi:
         arguments = arg_parser.parse_args()
         self.init_ui(arguments)
 
-
     @staticmethod
     def init_argparse():
         parser = argparse.ArgumentParser(usage="%(prog)s [OPTION] [FILE]...", description="Visualize and help annotate Vesuvian Challenge data.")
