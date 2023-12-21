@@ -13,6 +13,8 @@ import os
 import gc
 import sys
 import h5py
+from concurrent.futures import ThreadPoolExecutor
+import queue
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -51,6 +53,7 @@ class VesuviusKintsugi:
         self.show_image = True
         self.show_prediction = True
         self.show_barrier = True
+        self.update_queue = queue.Queue()
         self.initial_load = True
         self.mat_affine = np.eye(3)
         self.slice_cache = {}
@@ -59,6 +62,7 @@ class VesuviusKintsugi:
         arg_parser = self.init_argparse()
         arguments = arg_parser.parse_args()
         self.init_ui(arguments)
+
 
     @staticmethod
     def init_argparse():
@@ -326,16 +330,32 @@ class VesuviusKintsugi:
                                 continue
                             queue.append((cz + dz, cy + dy, cx + dx))
 
-            if counter % 10 == 0:
-                self.root.after(1, self.update_display_slice)
+            if counter % 100 == 0: # Increase this to avoid overwhelming the UI
+                self.update_queue.put(lambda: self.update_display_slice())
+                # self.root.after(1, self.update_display_slice)
         if self.flood_fill_active == True:
             self.flood_fill_active = False
             self.update_log("Flood fill ended.")
-            self.update_display_slice()
+            self.update_queue.put(lambda: self.update_display_slice())
+            # self.update_display_slice()
+    
+    def process_queue(self):
+        try:
+            while True:
+                update_func = self.update_queue.get_nowait()
+                update_func()
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self.process_queue)
 
     def stop_flood_fill(self):
         self.flood_fill_active = False
         self.update_log("Flood fill stopped.")
+
+    def threaded_start_anchor_flood_fill(self):
+        executor = ThreadPoolExecutor(max_workers=3)
+        executor.submit(self.start_anchor_flood_fill)
 
     def start_anchor_flood_fill(self):
         if self.old_anchor_mask is None:
@@ -346,19 +366,22 @@ class VesuviusKintsugi:
         anchor_points = np.where(anchor_points == 1)
         anchor_points = np.stack(anchor_points, axis=1)
         self.update_log(f"Starting anchor flood fill...")
-        queue = deque(anchor_points)
+        print(f"Starting anchor flood fill...")
+        anchor_queue = deque(anchor_points)
         total_anchor_count = len(anchor_points)
-        for i in range(total_anchor_count):
-            self.update_log(f"{i+1} / {total_anchor_count} anchor points processed")
+        executor = ThreadPoolExecutor(max_workers=3)
+        for i, anchor_point in enumerate(anchor_queue):    
             # Run flood_fill_3d in a separate thread
-            thread = threading.Thread(target=self.flood_fill_3d, args=(queue.popleft(),))
-            thread.start()
+            # self.click_coordinates = self.calculate_image_coordinates(tuple(anchor_queue.popleft()))
+            executor.submit(self.flood_fill_3d, anchor_point)
+            if i % 5 == 0:  # Update GUI every 5 tasks
+                self.update_log(f"{i+1} / {total_anchor_count} anchor points processed")
+                print(f"{i+1} / {total_anchor_count} anchor points processed")
+        executor.shutdown(wait=True)
         self.update_log(f"Anchor flood fill ended.")
+        print(f"Anchor flood fill ended.")
         # Reset anchor mask
-        self.anchor_mask = np.zeros_like(self.mask_data, dtype=np.uint8)
-        # pass # LIAM TODO: add anchor flood fill functionality based on old anchor mask vs new mask
-        # # grab current mask, compare to old mask, add new pixels to queue, run flood fill on queue
-        # # should have a counter in the logs. 
+        self.anchor_mask = np.zeros_like(self.anchor_mask, dtype=np.uint8)
 
     def save_state(self):
         # Save the current state of the image before modifying it
@@ -543,10 +566,6 @@ class VesuviusKintsugi:
                 self.threaded_flood_fill()  # Assuming threaded_flood_fill is implemented for non-blocking UI
         elif self.mode.get() == "anchor":
             self.color_pixel(img_coords)
-        # LIAM TODO: add anchor functionality should add to mask and add to anchor queue.
-        # Would be nice if erasing an anchor point would remove it from the queue
-        # Nicer if this just colors 1 pixel by default and then the queue is all new pixels in the mask compared to the previous mask
-        # since the last anchor run.
         elif self.mode.get() == "pencil":
             # Assuming the pencil (pixel editing) functionality
             self.color_pixel(img_coords)  # Assuming color_pixel is implemented
@@ -571,9 +590,13 @@ class VesuviusKintsugi:
             img_x = int(transformed_point[0])
             img_y = int(transformed_point[1])
 
-            # Ensure the coordinates are within the bounds of the image
-            img_x = max(0, min(img_x, self.voxel_data[self.z_index].shape[1] - 1))
-            img_y = max(0, min(img_y, self.voxel_data[self.z_index].shape[0] - 1))
+            if self.format == "tiff":
+                # Ensure the coordinates are within the bounds of the image
+                img_x = max(0, min(img_x, self.voxel_data[self.z_index].shape[1] - 1))
+                img_y = max(0, min(img_y, self.voxel_data[self.z_index].shape[0] - 1))
+            else:
+                img_x = max(0, min(img_x, self.voxel_data.shape[2] - 1))
+                img_y = max(0, min(img_y, self.voxel_data.shape[1] - 1))
 
             return self.z_index, img_y, img_x
 
@@ -590,7 +613,7 @@ class VesuviusKintsugi:
             # Decide which mask to edit based on editing_barrier flag
             if self.editing_barrier:
                 target_mask = self.barrier_mask
-            elif self.editing_anchor: # TODO ADD BARRIER EDITING TOGGLE
+            elif self.editing_anchor and self.mode.get() == "eraser":
                 target_mask = self.anchor_mask
             else:
                 target_mask = self.mask_data
@@ -732,10 +755,15 @@ class VesuviusKintsugi:
         self.update_display_slice()
         self.update_log(f"Ink predicton {'shown' if self.show_prediction else 'hidden'}.\n")
 
-    def toggle_editing_mode(self):
+    def toggle_editing_barrier_mode(self):
         # Toggle between editing label and barrier
         self.editing_barrier = not self.editing_barrier
         self.update_log(f"Editing {'Barrier' if self.editing_barrier else 'Label'}")
+    
+    def toggle_editing_anchor_mode(self):
+        # Toggle between editing label and barrier
+        self.editing_anchor = not self.editing_anchor
+        self.update_log(f"Editing {'Barrier' if self.editing_anchor else 'Label'}")
 
     def update_alpha(self, val):
         self.overlay_alpha = int(float(val))
@@ -919,11 +947,11 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         self.create_tooltip(eraser_button, "Eraser Tool")
 
         self.editing_barrier_var = tk.BooleanVar(value=self.editing_barrier)
-        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Barrier", command=self.toggle_editing_mode, variable=self.editing_barrier_var)
+        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Barrier", command=self.toggle_editing_barrier_mode, variable=self.editing_barrier_var)
         toggle_editing_button.pack(side=tk.LEFT, padx=5)
 
         self.editing_anchor_var = tk.BooleanVar(value=self.editing_anchor)
-        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Anchor", command=self.toggle_editing_mode, variable=self.editing_anchor_var)
+        toggle_editing_button = ttk.Checkbutton(self.toolbar_frame, text="Edit Anchors", command=self.toggle_editing_anchor_mode, variable=self.editing_anchor_var)
         toggle_editing_button.pack(side=tk.LEFT, padx=5)
 
         self.pencil_size_var = tk.StringVar(value="0")  # Default pencil size
@@ -948,7 +976,7 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         anchor_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(anchor_button, "Create Anchor Points")
 
-        start_anchor_fill_button = ttk.Button(self.toolbar_frame, image=start_anchor_icon, command=self.start_anchor_flood_fill)
+        start_anchor_fill_button = ttk.Button(self.toolbar_frame, image=start_anchor_icon, command=self.threaded_start_anchor_flood_fill)
         start_anchor_fill_button.image = start_anchor_icon
         start_anchor_fill_button.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(start_anchor_fill_button, "Start Anchor Flood Fill")
@@ -1094,6 +1122,7 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         if arguments.h5fs_file:
             self.load_data(h5_filename=arguments.h5fs_file, h5_axes_seq=arguments.axes, h5_roi=arguments.roi)
 
+        self.process_queue()
         self.root.mainloop()
         self.on_exit()
 
