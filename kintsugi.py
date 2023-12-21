@@ -365,7 +365,6 @@ class VesuviusKintsugi:
         executor = ThreadPoolExecutor(max_workers=3)
         for i, anchor_point in enumerate(anchor_queue):    
             # Run flood_fill_3d in a separate thread
-            # self.click_coordinates = self.calculate_image_coordinates(tuple(anchor_queue.popleft()))
             executor.submit(self.flood_fill_3d, anchor_point)
             if i % 5 == 0:  # Update GUI every 5 tasks
                 self.update_log(f"{i+1} / {total_anchor_count} anchor points processed")
@@ -473,7 +472,7 @@ class VesuviusKintsugi:
             if self.anchor_mask is not None and self.show_anchor:
                 anchor = np.uint8(self.anchor_mask[self.z_index, :, :] * self.overlay_alpha)
                 green = np.zeros_like(anchor, dtype=np.uint8)
-                green[:, :] = 128  # green color..? lol I have no idea how the color is being defined here
+                green[:, :] = 128  # Green color
                 anchor_img = Image.fromarray(np.stack([np.zeros_like(anchor), green, np.zeros_like(anchor), anchor], axis=-1), 'RGBA')
 
                 # Overlay the barrier mask on the original image
@@ -614,17 +613,12 @@ class VesuviusKintsugi:
             for y in range(min_y, max_y + 1):
                 for x in range(min_x, max_x + 1):
                     # Check if the pixel is within the circle's radius
-                    target_mask[z_index, y, x] = mask_value
+                    if math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2) <= self.pencil_size:
+                            target_mask[z_index, y, x] = mask_value
             self.update_display_slice()
         elif self.mode.get() == "anchor":
-            # Decide which mask to edit based on editing_barrier flag
             target_mask = self.anchor_mask
-            mask_value = 1
-            for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
-                    # Check if the pixel is within the circle's radius
-                    if math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2) <= 1:
-                            target_mask[z_index, center_y, center_x] = mask_value
+            target_mask[z_index, center_y, center_x] = 1
             self.update_display_slice()
 
 
@@ -789,19 +783,24 @@ Commands Overview:
   5. Brush Tool: Edit labels or barriers with a freehand brush.
   6. Eraser Tool: Erase parts of the label or barrier.
   7. Edit Barrier: Toggle between editing the label or the barrier mask.
-  8. Pencil Size: Adjust the size of the brush and eraser tools.
-  9. 3D Flood Fill Tool: Fill an area with the label based on similarity.
-  10. STOP: Interrupt the ongoing flood fill operation.
-  11. Info: Display information and usage tips.
+  8. Edit Anchor: Toggle between editing the label or the anchor mask (for erasing anchor points).
+  9. Pencil Size: Adjust the size of the brush and eraser tools.
+  10. 3D Flood Fill Tool: Fill an area with the label based on similarity.
+  11. Anchor Flood Fill Tool: Select multiple starting points for the 3D flood fill tool.
+  12. Start Anchor Flood Fill: Start the 3D flood fill operation on all anchor poins as the seed points for 3D flood fill.
+  13. STOP: Interrupt the ongoing flood fill operation.
+  14. Info: Display information and usage tips.
 
 - Sliders and Toggles (Bottom):
   1. Toggle Label: Show or hide the label overlay.
-  2. Toggle Barrier: Show or hide the barrier overlay.
-  3. Opacity: Adjust the transparency of the label and barrier overlays.
-  4. Toggle Image: Show or hide the image data.
-  5. Bucket Layer: Select the layer to adjust its specific flood fill threshold.
-  6. Bucket Threshold: Set the threshold for the flood fill tool.
-  7. Max Propagation: Limit the extent of the flood fill operation.
+  2. Toggle Anchors: Show or hide the Anchor overlay.
+  3. Toggle Barrier: Show or hide the barrier overlay.
+  4. Toggle Prediction: Show or hide the Prediction overlay.
+  5. Opacity: Adjust the transparency of the label and barrier overlays.
+  6. Toggle Image: Show or hide the image data.
+  7. Bucket Layer: Select the layer to adjust its specific flood fill threshold.
+  8. Bucket Threshold: Set the threshold for the flood fill tool.
+  9. Max Propagation: Limit the extent of the flood fill operation.
 
 Usage Tips:
 - Pouring Gold: The 3D flood fill algorithm labels contiguous areas based on voxel intensity and the set threshold.
@@ -811,6 +810,8 @@ Usage Tips:
 - Editing Modes: Use the "Edit Barrier" toggle to switch between modifying the label and the barrier mask.
 - Overlay Visibility: Use the toggle buttons to show or hide the label, barrier, and image data for easier editing.
 - Tool Size: Use the "Pencil Size" slider to adjust the size of the brush and eraser.
+- Anchor mode: Use the "Edit Anchor" toggle and the eraser to erase misplaced anchor points prior to running anchor flood fill. 
+- Start Anchor flood fill: The UI hanging when selecting more than 3-5 anchor points is normal, but the program is still running. Check the terminal for progress updates.
 
 Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D voxel image labeling. Released under the MIT license.
 """
@@ -1079,7 +1080,7 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         bucket_threshold_label = ttk.Label(slider_frame, text="Bucket Threshold:")
         bucket_threshold_label.pack(side=tk.LEFT, padx=(10, 2))
 
-        self.bucket_threshold_slider = ttk.Scale(slider_frame, from_=0, to=4000, orient=tk.HORIZONTAL, command=self.update_threshold_value)
+        self.bucket_threshold_slider = ttk.Scale(slider_frame, from_=0, to=100, orient=tk.HORIZONTAL, command=self.update_threshold_value)
         self.bucket_threshold_slider.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(self.bucket_threshold_slider, "Adjust Bucket Threshold")
 
@@ -1091,7 +1092,7 @@ Created by Dr. Giorgio Angelotti, Vesuvius Kintsugi is designed for efficient 3D
         max_propagation_label = ttk.Label(slider_frame, text="Max Propagation:")
         max_propagation_label.pack(side=tk.LEFT, padx=(10, 2))
 
-        max_propagation_slider = ttk.Scale(slider_frame, from_=1, to=2500, orient=tk.HORIZONTAL, command=self.update_max_propagation)
+        max_propagation_slider = ttk.Scale(slider_frame, from_=1, to=500, orient=tk.HORIZONTAL, command=self.update_max_propagation)
         max_propagation_slider.set(self.max_propagation_steps)
         max_propagation_slider.pack(side=tk.LEFT, padx=2)
         self.create_tooltip(max_propagation_slider, "Adjust Max Propagation Steps for Flood Fill")
